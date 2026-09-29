@@ -97,6 +97,6 @@ Git 화면은 디스크에 저장된 파일을 비교합니다. 다른 파일의
 .\mvnw.cmd javafx:run '-Djavafx.args=--smoke-test'
 ```
 
-Windows / JDK 25에서 단위·통합 테스트 14개와 실제 JavaFX 창 smoke test를 검증했습니다. Smoke test는 셀 편집 컨트롤, 수식 갱신, 실행 취소/다시 실행, 필터, 주소 이동을 확인한 후 종료합니다. Linux CI에서는 Xvfb로 실행합니다. Microsoft Excel 애플리케이션 자체와의 수동 상호운용 테스트는 수행하지 않았습니다.
+Windows와 Linux / JDK 25에서 단위·통합 테스트 14개를 검증했고, 로컬 Windows 및 Linux CI에서 실제 JavaFX 창 smoke test도 통과했습니다. Smoke test는 셀 편집 컨트롤, 수식 갱신, 실행 취소/다시 실행, 필터, 주소 이동을 확인한 후 종료합니다. Linux CI에서는 Xvfb로 실행합니다. Microsoft Excel 애플리케이션 자체와의 수동 상호운용 테스트는 수행하지 않았습니다.
 
 [설계 및 확장 계획](docs/ARCHITECTURE.md)을 참고하세요.
