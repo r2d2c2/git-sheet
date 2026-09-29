@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
   <modelVersion>4.0.0</modelVersion>
-  <groupId>io.github.r2d2c2</groupId><artifactId>git-sheet</artifactId><version>0.1.0-SNAPSHOT</version>
+  <groupId>io.github.r2d2c2</groupId><artifactId>git-sheet</artifactId><version>0.2.0-SNAPSHOT</version>
   <name>Git Sheet</name><description>Git-friendly JavaFX spreadsheet for JDK 25</description>
   <properties><maven.compiler.release>25</maven.compiler.release><project.build.sourceEncoding>UTF-8</project.build.sourceEncoding><javafx.version>25.0.4</javafx.version></properties>
   <dependencyManagement><dependencies><dependency><groupId>org.apache.logging.log4j</groupId><artifactId>log4j-bom</artifactId><version>2.26.1</version><type>pom</type><scope>import</scope></dependency></dependencies></dependencyManagement>

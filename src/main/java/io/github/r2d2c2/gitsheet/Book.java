@@ -100,11 +100,19 @@ public final class Book implements AutoCloseable {
                 case "align" -> result.setAlignment(HorizontalAlignment.valueOf(value));
                 case "wrap" -> result.setWrapText(Boolean.parseBoolean(value));
                 case "fill" -> { result.setFillForegroundColor(Short.parseShort(value)); result.setFillPattern(FillPatternType.SOLID_FOREGROUND); }
-                case "bold", "italic" -> {
+                case "border" -> {
+                    var border = BorderStyle.valueOf(value); result.setBorderTop(border); result.setBorderBottom(border); result.setBorderLeft(border); result.setBorderRight(border);
+                }
+                case "bold", "italic", "size", "underline" -> {
                     var previous = workbook.getFontAt(old.getFontIndex());
-                    var font = workbook.createFont(); font.setFontName(previous.getFontName()); font.setFontHeight(previous.getFontHeight());
-                    font.setBold(previous.getBold()); font.setItalic(previous.getItalic()); font.setColor(previous.getColor());
-                    if (property.equals("bold")) font.setBold(Boolean.parseBoolean(value)); else font.setItalic(Boolean.parseBoolean(value));
+                    var font = workbook.createFont(); font.getCTFont().set(previous.getCTFont());
+                    switch (property) {
+                        case "bold" -> font.setBold(Boolean.parseBoolean(value));
+                        case "italic" -> font.setItalic(Boolean.parseBoolean(value));
+                        case "size" -> font.setFontHeightInPoints(Short.parseShort(value));
+                        case "underline" -> font.setUnderline(Boolean.parseBoolean(value) ? Font.U_SINGLE : Font.U_NONE);
+                        default -> throw new IllegalArgumentException(property);
+                    }
                     result.setFont(font);
                 }
                 default -> throw new IllegalArgumentException(property);

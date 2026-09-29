@@ -20,6 +20,7 @@ import java.nio.file.*;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.function.Supplier;
+import java.util.function.BooleanSupplier;
 
 public final class SpreadsheetApp extends Application {
     private Book book = new Book();
@@ -34,6 +35,10 @@ public final class SpreadsheetApp extends Application {
     private final Label status = new Label("준비"), selectionInfo = new Label();
     private final ExecutorService background = Executors.newVirtualThreadPerTaskExecutor();
     private boolean changingTabs;
+    private SaveNotification saveNotification;
+    private GitDialog gitDialog;
+    private boolean gitBusy;
+    private BooleanSupplier pendingEdit;
     private record Position(int row, int column) {}
     private record Bounds(int firstRow, int lastRow, int firstCol, int lastCol) {}
 
@@ -42,7 +47,7 @@ public final class SpreadsheetApp extends Application {
         this.stage = stage;
         var root = new BorderPane();
         root.setTop(new VBox(menu(), toolbar(), formulaBar()));
-        grid.setEditable(true); grid.setFixedCellSize(29); grid.getSelectionModel().setCellSelectionEnabled(true);
+        grid.setEditable(true); grid.setFixedCellSize(-1); grid.getSelectionModel().setCellSelectionEnabled(true);
         grid.getSelectionModel().setSelectionMode(SelectionMode.MULTIPLE);
         grid.getSelectionModel().getSelectedCells().addListener((javafx.collections.ListChangeListener<TablePosition>) change -> selectionChanged());
         grid.setOnKeyPressed(this::gridKey);
@@ -55,7 +60,9 @@ public final class SpreadsheetApp extends Application {
         });
         var foot = new HBox(20, status, selectionInfo); foot.setPadding(new Insets(8, 14, 8, 14));
         root.setBottom(new VBox(tabs, foot));
-        var scene = new Scene(root, 1280, 820);
+        var overlay = new StackPane(root);
+        saveNotification = new SaveNotification(overlay);
+        var scene = new Scene(overlay, 1280, 820);
         scene.getStylesheets().add(Objects.requireNonNull(getClass().getResource("/theme.css")).toExternalForm());
         scene.getAccelerators().put(new KeyCodeCombination(KeyCode.S, KeyCombination.SHORTCUT_DOWN), () -> save(false));
         scene.getAccelerators().put(new KeyCodeCombination(KeyCode.O, KeyCombination.SHORTCUT_DOWN), this::open);
@@ -70,11 +77,8 @@ public final class SpreadsheetApp extends Application {
                     if (grid.getColumns().size() != COLUMN_WINDOW + 1 || !book.display(0, 4, 3).equals("₩660,000"))
                         throw new IllegalStateException("UI smoke test failed: " + book.display(0, 4, 3));
                     smokeTest();
-                    var screenshot = getParameters().getNamed().get("screenshot");
-                    if (screenshot != null) screenshot(Path.of(screenshot));
-                    System.out.println("GIT_SHEET_UI_SMOKE_OK");
-                } catch (Exception e) { e.printStackTrace(); System.exit(1); }
-                finally { Platform.exit(); }
+                    smokeSaveAndGit();
+                } catch (Exception e) { failSmoke(e); }
             });
         }
     }
@@ -84,20 +88,29 @@ public final class SpreadsheetApp extends Application {
                 item("저장", () -> save(false)), item("다른 이름으로 저장", () -> save(true)), new SeparatorMenuItem(),
                 item("Excel 내보내기 (.xlsx)", () -> export(false)), item("현재 시트 CSV 내보내기", () -> export(true)));
         var edit = new Menu("편집"); edit.getItems().addAll(item("실행 취소  Ctrl+Z", this::undo), item("다시 실행  Ctrl+Y", this::redo),
-                item("복사  Ctrl+C", this::copy), item("붙여넣기  Ctrl+V", this::paste), item("내용 지우기", this::clear), item("찾기", this::find));
+                item("복사  Ctrl+C", this::copy), item("붙여넣기  Ctrl+V", this::paste), item("내용 지우기", this::clear), item("찾기", this::find), item("찾기 및 바꾸기", this::replaceAll),
+                new SeparatorMenuItem(), item("아래로 채우기  Ctrl+D", () -> fill(SheetEdits.Direction.DOWN)), item("오른쪽 채우기  Ctrl+R", () -> fill(SheetEdits.Direction.RIGHT)));
+        var format = new Menu("서식"); format.getItems().addAll(
+                item("왼쪽 정렬", () -> applyStyle("align", "LEFT")), item("가운데 정렬", () -> applyStyle("align", "CENTER")), item("오른쪽 정렬", () -> applyStyle("align", "RIGHT")),
+                item("모든 테두리", () -> applyStyle("border", "THIN")), item("테두리 없음", () -> applyStyle("border", "NONE")),
+                item("글꼴 크기", () -> prompt("글꼴 크기", "크기 (6–72)", "13").ifPresent(value -> {
+                    try { int size = Integer.parseInt(value); if (size < 6 || size > 72) throw new IllegalArgumentException("6–72 범위의 크기를 입력하세요."); applyStyle("size", value); }
+                    catch (Exception e) { error(e); }
+                })), item("열 너비", this::columnWidth));
         var sheet = new Menu("시트"); sheet.getItems().addAll(item("시트 추가", this::addSheet), item("시트 이름 변경", this::renameSheet),
                 item("시트 삭제", this::deleteSheet), item("이전 1,000행", () -> page(-1)), item("다음 1,000행", () -> page(1)));
-        var git = new Menu("Git"); git.getItems().addAll(item("문서 변경 내용 / 기록", this::gitInspect), item("문서 저장 후 커밋", this::gitCommit));
-        var help = new Menu("도움말"); help.getItems().add(item("사용법 및 호환성", () -> textDialog("Git Sheet 0.1", "JDK 25 + JavaFX\n\n"
+        var git = new Menu("Git"); git.getItems().addAll(item("서버 연결 / 동기화", this::gitConnect), item("문서 변경 내용 / 기록", this::gitInspect), item("문서 저장 후 커밋", this::gitCommit));
+        var help = new Menu("도움말"); help.getItems().add(item("사용법 및 호환성", () -> textDialog("Git Sheet 0.2", "JDK 25 + JavaFX\n\n"
                 + "더블 클릭 / F2: 셀 편집 · Enter: 적용 · Escape: 취소\n수식: =SUM(A1:A10), =IF(B1>0,\"예\",\"아니오\")\n"
                 + "주소 상자: A1 또는 Z10000 입력 → 이동\n정렬·필터는 현재 1,000행 화면에만 적용되며 원본 행은 이동하지 않습니다.\n"
-                + "Ctrl+C/V: 탭으로 구분된 직사각형 데이터 복사·붙여넣기\nCtrl+S: Git 친화적인 .gsheet 저장\n\n"
+                + "Ctrl+C/V: 탭으로 구분된 직사각형 데이터 복사·붙여넣기\nCtrl+D/R: 아래로/오른쪽 채우기 (상대 참조 이동)\nCtrl+S: Git 친화적인 .gsheet 저장 · 저장 위치 알림 4초\n"
+                + "Git → 서버 연결 / 동기화: GitHub·GitLab·Gitea·자체 서버 선택, push/fetch\n\n"
                 + "지원: 값, POI 지원 수식, 기본 서식, 다중 시트, CSV/XLSX, 실행 취소, Git diff/commit, 간단한 차트\n"
                 + "제한: Excel 완전 호환 제품이 아닙니다. VBA, Power Query, 피벗, 협업, 고급 차트 및 동적 배열 미지원.\n"
                 + ".gsheet 변환은 그림, 이름 정의, 유효성 검사, 조건부 서식 등 고급 Excel 요소를 보존하지 않습니다.\n"
                 + "병합·틀 고정 정보는 저장되지만 화면에는 반영되지 않습니다. 원본 .xlsx는 따로 보관하세요.\n"
                 + "외부 연결은 갱신하지 않으며 지원하지 않는 수식은 #UNSUPPORTED!로 표시됩니다.")));
-        return new MenuBar(file, edit, sheet, git, help);
+        return new MenuBar(file, edit, format, sheet, git, help);
     }
     private ToolBar toolbar() {
         var formats = new ComboBox<String>(FXCollections.observableArrayList("일반", "숫자", "통화", "백분율", "날짜"));
@@ -110,7 +123,7 @@ public final class SpreadsheetApp extends Application {
                 button("굵게", () -> toggleFont("bold")), button("기울임", () -> toggleFont("italic")),
                 button("노란 배경", () -> applyStyle("fill", Short.toString(IndexedColors.LIGHT_YELLOW.getIndex()))), formats,
                 new Separator(), button("A→Z", () -> sort(false)), button("Z→A", () -> sort(true)), filter,
-                button("차트", this::chart), button("Git", this::gitInspect));
+                button("차트", this::chart), button("Git", this::gitConnect));
     }
     private HBox formulaBar() {
         address.setPrefWidth(100); address.setMaxWidth(100); address.setOnAction(_ -> goTo());
@@ -180,9 +193,9 @@ public final class SpreadsheetApp extends Application {
         }
         selectionInfo.setText("선택 %d셀 · 숫자 %d · 합계 %s".formatted(values.size(), count, Double.toString(sum)));
     }
-    private void mutate(Runnable action) {
-        try { book.transaction(_ -> action.run()); dirty = true; grid.refresh(); title(); selectionChanged(); }
-        catch (Exception e) { error(e); grid.refresh(); }
+    private boolean mutate(Runnable action) {
+        try { book.transaction(_ -> action.run()); dirty = true; grid.refresh(); title(); selectionChanged(); return true; }
+        catch (Exception e) { error(e); grid.refresh(); return false; }
     }
     private void undo() { if (book.undo()) { dirty = true; refreshTabs(); refresh(); } }
     private void redo() { if (book.redo()) { dirty = true; refreshTabs(); refresh(); } }
@@ -201,6 +214,8 @@ public final class SpreadsheetApp extends Application {
         if (event.isShortcutDown()) {
             if (event.getCode() == KeyCode.C) { copy(); event.consume(); }
             else if (event.getCode() == KeyCode.V) { paste(); event.consume(); }
+            else if (event.getCode() == KeyCode.D) { fill(SheetEdits.Direction.DOWN); event.consume(); }
+            else if (event.getCode() == KeyCode.R) { fill(SheetEdits.Direction.RIGHT); event.consume(); }
         } else if (event.getCode() == KeyCode.DELETE || event.getCode() == KeyCode.BACK_SPACE) { clear(); event.consume(); }
         else if (event.getCode() == KeyCode.F2 || event.getCode() == KeyCode.ENTER) {
             var focus = grid.getFocusModel().getFocusedCell(); grid.edit(focus.getRow(), focus.getTableColumn()); event.consume();
@@ -274,6 +289,34 @@ public final class SpreadsheetApp extends Application {
             status.setText("검색 결과가 없습니다.");
         });
     }
+    private void fill(SheetEdits.Direction direction) {
+        var b = bounds(); if (b == null) return;
+        int first = grid.getItems().get(b.firstRow()), last = grid.getItems().get(b.lastRow());
+        for (int r = b.firstRow(); r <= b.lastRow(); r++) {
+            if (grid.getItems().get(r) != first + r - b.firstRow()) { status.setText("채우기를 사용하려면 정렬·필터를 해제하고 연속된 범위를 선택하세요."); return; }
+        }
+        int left = (Integer) grid.getColumns().get(b.firstCol()).getUserData(), right = (Integer) grid.getColumns().get(b.lastCol()).getUserData();
+        mutate(() -> SheetEdits.fill(book, sheetIndex, first, last, left, right, direction));
+    }
+    private void replaceAll() {
+        var dialog = new Dialog<ButtonType>(); dialog.initOwner(stage); dialog.setTitle("찾기 및 바꾸기");
+        var find = new TextField(); find.setPromptText("찾을 텍스트"); var replacement = new TextField(); replacement.setPromptText("바꿀 텍스트");
+        var matchCase = new CheckBox("대소문자 구분"); var formulas = new CheckBox("수식도 검색 (참조가 바뀔 수 있음)");
+        var form = new VBox(10, new Label("현재 시트의 텍스트를 모두 바꿉니다. 실행 취소할 수 있습니다."), find, replacement, matchCase, formulas); form.setPadding(new Insets(12));
+        var replace = new ButtonType("모두 바꾸기", ButtonBar.ButtonData.OK_DONE); dialog.getDialogPane().getButtonTypes().addAll(replace, ButtonType.CANCEL); dialog.getDialogPane().setContent(form);
+        if (dialog.showAndWait().orElse(ButtonType.CANCEL) == replace) {
+            mutate(() -> { int count = SheetEdits.replaceAll(book, sheetIndex, find.getText(), replacement.getText(), matchCase.isSelected(), formulas.isSelected()); status.setText(count + "개 셀을 바꿨습니다."); });
+        }
+    }
+    private void columnWidth() {
+        var positions = selectedPositions(); if (positions.isEmpty()) return;
+        prompt("열 너비", "문자 기준 너비 (1–255)", "15").ifPresent(value -> {
+            try {
+                int width = Integer.parseInt(value); if (width < 1 || width > 255) throw new IllegalArgumentException("1–255 범위의 너비를 입력하세요.");
+                mutate(() -> positions.stream().map(Position::column).distinct().forEach(c -> book.workbook().getSheetAt(sheetIndex).setColumnWidth(c, width * 256))); refresh();
+            } catch (Exception e) { error(e); }
+        });
+    }
     private void addSheet() {
         prompt("시트 추가", "새 시트 이름", "Sheet" + (book.workbook().getNumberOfSheets() + 1)).ifPresent(name -> {
             mutate(() -> { WorkbookUtil.validateSheetName(name); book.workbook().createSheet(name); });
@@ -309,12 +352,14 @@ public final class SpreadsheetApp extends Application {
         } catch (Exception e) { error(e); }
     }
     private boolean save(boolean saveAs) {
+        if (gitBusy) { status.setText("Git 작업을 마친 후 다시 저장하세요."); return false; }
+        if (pendingEdit != null && !pendingEdit.getAsBoolean()) return false;
         Path target = document;
         if (saveAs || target == null) {
             var chooser = chooser("Git Sheet 저장", "Git Sheet", "*.gsheet"); chooser.setInitialFileName(document == null ? "workbook.gsheet" : document.getFileName().toString());
             var file = chooser.showSaveDialog(stage); if (file == null) return false; target = extension(file.toPath(), ".gsheet");
         }
-        try { BookFiles.write(book, target); document = target; dirty = false; title(); status.setText("저장됨 · " + target); return true; }
+        try { BookFiles.write(book, target); document = target.toAbsolutePath().normalize(); dirty = false; title(); status.setText("저장됨 · " + document); saveNotification.show(document); return true; }
         catch (Exception e) { error(e); return false; }
     }
     private void export(boolean csv) {
@@ -324,6 +369,7 @@ public final class SpreadsheetApp extends Application {
             var path = extension(file.toPath(), csv ? ".csv" : ".xlsx");
             if (csv) BookFiles.exportCsv(book, sheetIndex, path); else BookFiles.exportExcel(book, path);
             status.setText("내보내기 완료 · " + path);
+            saveNotification.show(path);
         } catch (Exception e) { error(e); }
     }
     private static Path extension(Path path, String extension) { return path.toString().toLowerCase(Locale.ROOT).endsWith(extension) ? path : path.resolveSibling(path.getFileName() + extension); }
@@ -331,6 +377,7 @@ public final class SpreadsheetApp extends Application {
         var chooser = new FileChooser(); chooser.setTitle(title); chooser.getExtensionFilters().add(new FileChooser.ExtensionFilter(label, patterns)); return chooser;
     }
     private boolean canLeave() {
+        if (pendingEdit != null && !pendingEdit.getAsBoolean()) return false;
         if (!dirty) return true;
         var alert = new Alert(Alert.AlertType.CONFIRMATION, "저장하지 않은 변경이 있습니다.", ButtonType.YES, ButtonType.NO, ButtonType.CANCEL);
         alert.initOwner(stage); alert.setHeaderText("변경 내용을 저장할까요?");
@@ -342,21 +389,31 @@ public final class SpreadsheetApp extends Application {
         book = next;
     }
     private void gitInspect() {
-        if (document == null) { if (!save(false)) return; }
+        if (gitBusy) return;
+        if (document == null || dirty) { if (!save(false)) return; }
         Path path = document; async("Git 변경 내역", () -> { try { return GitService.inspect(path); } catch (Exception e) { throw new CompletionException(e); } });
     }
     private void gitCommit() {
+        if (gitBusy) return;
         prompt("Git 커밋", "선택한 문서만 저장하고 커밋합니다. 새 저장소는 문서 폴더에 생성됩니다.", "Update workbook").ifPresent(message -> {
             if (!save(false)) return;
             Path path = document; async("Git 커밋", () -> { try { return GitService.commit(path, message); } catch (Exception e) { throw new CompletionException(e); } });
         });
     }
     private void async(String title, Supplier<String> task) {
+        if (gitBusy) return;
+        gitBusy = true;
         status.setText(title + " 실행 중…");
         CompletableFuture.supplyAsync(task, background).whenComplete((result, error) -> Platform.runLater(() -> {
+            gitBusy = false;
             status.setText(title + (error == null ? " 완료" : " 실패"));
             if (error != null) error(error.getCause() == null ? error : error.getCause()); else textDialog(title, result);
         }));
+    }
+    private void gitConnect() {
+        if (document == null && !save(false)) return;
+        if (gitDialog != null && gitDialog.isShowing()) { gitDialog.getDialogPane().getScene().getWindow().requestFocus(); return; }
+        gitDialog = new GitDialog(stage, document, background); gitDialog.show();
     }
     private void chart() {
         var b = bounds(); if (b == null || b.firstCol() == b.lastCol()) { status.setText("차트를 만들려면 이름 열과 숫자 열을 함께 선택하세요."); return; }
@@ -419,6 +476,39 @@ public final class SpreadsheetApp extends Application {
         if (path.toAbsolutePath().getParent() != null) Files.createDirectories(path.toAbsolutePath().getParent());
         javax.imageio.ImageIO.write(rendered, "png", path.toFile());
     }
+    @SuppressWarnings("unchecked")
+    private void smokeSaveAndGit() throws Exception {
+        var folder = Files.createTempDirectory(Path.of("target"), "ui-smoke-").toAbsolutePath();
+        if (GitService.run(folder, "init", "-b", "main").code() != 0) throw new IllegalStateException("Smoke repository initialization failed");
+        document = folder.resolve("저장 알림.gsheet");
+        if (!save(false) || !saveNotification.isVisible() || !saveNotification.displayedPath().equals(document.toString())) throw new IllegalStateException("Save notification did not display the actual path");
+        gitDialog = new GitDialog(stage, document, background); gitDialog.show();
+        gitDialog.whenIdle().thenRun(() -> {
+            var pane = gitDialog.getDialogPane();
+            var services = (ComboBox<GitService.Provider>) pane.lookup("#git-provider");
+            services.setValue(GitService.Provider.GITEA);
+            ((TextField) pane.lookup("#git-url")).setText("https://gitea.example/test/workbook.git");
+            ((TextField) pane.lookup("#git-name")).setText("UI Smoke");
+            ((TextField) pane.lookup("#git-email")).setText("smoke@example.invalid");
+            ((Button) pane.lookup("#git-save")).fire();
+            gitDialog.whenIdle().thenRun(() -> {
+                try {
+                    var settings = GitService.settings(document);
+                    if (settings.provider() != GitService.Provider.GITEA || !settings.url().equals("https://gitea.example/test/workbook.git")) throw new IllegalStateException("Provider settings did not persist");
+                    gitDialog.close(); save(false);
+                    var image = getParameters().getNamed().get("screenshot");
+                    stage.getScene().getRoot().applyCss(); stage.getScene().getRoot().layout();
+                    if (image != null) screenshot(Path.of(image));
+                    var delay = new javafx.animation.PauseTransition(SaveNotification.DISPLAY_TIME.add(javafx.util.Duration.millis(500)));
+                    delay.setOnFinished(_ -> {
+                        if (saveNotification.isVisible()) { failSmoke(new IllegalStateException("Save notification did not auto-dismiss")); return; }
+                        System.out.println("GIT_SHEET_UI_SMOKE_OK (editing, save popup, provider persistence, timed dismissal)"); Platform.exit();
+                    }); delay.play();
+                } catch (Exception e) { failSmoke(e); }
+            }).exceptionally(failure -> { failSmoke(failure); return null; });
+        }).exceptionally(failure -> { failSmoke(failure); return null; });
+    }
+    private static void failSmoke(Throwable failure) { failure.printStackTrace(); System.exit(1); }
     private final class GridCell extends TableCell<Integer, String> {
         private final int column;
         private TextField editor;
@@ -436,22 +526,31 @@ public final class SpreadsheetApp extends Application {
                 var color = xs.getFillForegroundXSSFColor(); var rgb = color == null ? null : color.getRGB();
                 if (rgb != null) css.append("-fx-background-color:#").append(HexFormat.of().formatHex(rgb)).append(';');
             }
-            css.append("-fx-alignment:").append(cell.getCellType() == CellType.NUMERIC || cell.getCellType() == CellType.FORMULA ? "CENTER-RIGHT" : "CENTER-LEFT").append(';');
+            css.append("-fx-font-size:").append(font.getFontHeightInPoints()).append("pt;");
+            String alignment = switch (style.getAlignment()) {
+                case CENTER, CENTER_SELECTION -> "CENTER"; case RIGHT -> "CENTER-RIGHT"; case LEFT -> "CENTER-LEFT";
+                default -> cell.getCellType() == CellType.NUMERIC || cell.getCellType() == CellType.FORMULA ? "CENTER-RIGHT" : "CENTER-LEFT";
+            };
+            css.append("-fx-alignment:").append(alignment).append(';');
+            if (style.getBorderBottom() != BorderStyle.NONE || style.getBorderTop() != BorderStyle.NONE || style.getBorderLeft() != BorderStyle.NONE || style.getBorderRight() != BorderStyle.NONE)
+                css.append("-fx-border-color:#64748b;-fx-border-width:1;");
             setStyle(css.toString());
         }
         @Override public void startEdit() {
             if (isEmpty()) return;
             super.startEdit(); int row = getTableRow().getItem();
             editor = new TextField(book.raw(sheetIndex, row, column));
+            pendingEdit = () -> finish(row);
             editor.setOnAction(_ -> finish(row)); editor.setOnKeyPressed(event -> { if (event.getCode() == KeyCode.ESCAPE) { cancelEdit(); event.consume(); } });
             editor.focusedProperty().addListener((_, _, focus) -> { if (!focus && isEditing()) finish(row); });
             setText(null); setGraphic(editor); editor.requestFocus(); editor.selectAll();
         }
-        private void finish(int row) {
-            if (!isEditing()) return;
-            String text = editor.getText(); super.commitEdit(text); setGraphic(null); mutate(() -> book.set(sheetIndex, row, column, text));
+        private boolean finish(int row) {
+            if (!isEditing()) { pendingEdit = null; return true; }
+            String text = editor.getText(); pendingEdit = null; super.commitEdit(text); setGraphic(null);
+            return mutate(() -> book.set(sheetIndex, row, column, text));
         }
-        @Override public void cancelEdit() { super.cancelEdit(); setGraphic(null); setText(getItem()); }
+        @Override public void cancelEdit() { pendingEdit = null; super.cancelEdit(); setGraphic(null); setText(getItem()); }
     }
     @Override public void stop() throws Exception { background.shutdownNow(); book.close(); }
 }

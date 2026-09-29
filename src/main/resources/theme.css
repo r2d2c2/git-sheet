@@ -10,3 +10,4 @@
 .table-cell:selected { -fx-background-color: #dbeafe; -fx-text-fill: #12386c; -fx-border-color: #2563eb; -fx-border-width: 1; }
 .tab-pane .tab-header-area .tab-header-background { -fx-background-color: #e9eef7; }
 .text-field { -fx-background-radius: 4; }
+.save-notification { -fx-background-color: #166534; -fx-background-radius: 10; -fx-effect: dropshadow(gaussian, #00000044, 14, 0, 0, 4); }

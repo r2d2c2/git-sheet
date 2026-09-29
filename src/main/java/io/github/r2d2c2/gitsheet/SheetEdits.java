@@ -1,0 +1,59 @@
+package io.github.r2d2c2.gitsheet;
+
+import org.apache.poi.ss.SpreadsheetVersion;
+import org.apache.poi.ss.formula.*;
+import org.apache.poi.ss.usermodel.*;
+import org.apache.poi.xssf.usermodel.XSSFEvaluationWorkbook;
+import java.util.regex.*;
+
+/** Range editing primitives; callers wrap operations in Book.transaction for atomic undo. */
+public final class SheetEdits {
+    private SheetEdits() {}
+    public enum Direction { DOWN, RIGHT }
+    public static void fill(Book book, int sheet, int top, int bottom, int left, int right, Direction direction) {
+        if (top > bottom || left > right) throw new IllegalArgumentException("잘못된 선택 범위입니다.");
+        book.cell(sheet, top, left, false); book.cell(sheet, bottom, right, false);
+        for (int r = top; r <= bottom; r++) for (int c = left; c <= right; c++) {
+            int sourceRow = direction == Direction.DOWN ? top : r;
+            int sourceColumn = direction == Direction.RIGHT ? left : c;
+            if (sourceRow == r && sourceColumn == c) continue;
+            var source = book.cell(sheet, sourceRow, sourceColumn, false);
+            var target = book.cell(sheet, r, c, true); target.setBlank();
+            if (source == null) { target.setCellStyle(book.workbook().getCellStyleAt(0)); continue; }
+            target.setCellStyle(source.getCellStyle());
+            switch (source.getCellType()) {
+                case STRING -> target.setCellValue(source.getStringCellValue());
+                case NUMERIC -> target.setCellValue(source.getNumericCellValue());
+                case BOOLEAN -> target.setCellValue(source.getBooleanCellValue());
+                case ERROR -> target.setCellErrorValue(source.getErrorCellValue());
+                case FORMULA -> target.setCellFormula(translate(book, sheet, source.getCellFormula(), sourceRow, sourceColumn, r, c));
+                default -> target.setBlank();
+            }
+        }
+        book.resetEvaluator();
+    }
+    public static String translate(Book book, int sheet, String formula, int fromRow, int fromColumn, int toRow, int toColumn) {
+        var evaluator = XSSFEvaluationWorkbook.create(book.workbook());
+        var tokens = FormulaParser.parse(formula, evaluator, FormulaType.CELL, sheet, fromRow);
+        String name = book.workbook().getSheetName(sheet);
+        if (fromRow != toRow) FormulaShifter.createForRowCopy(sheet, name, fromRow, fromRow, toRow - fromRow, SpreadsheetVersion.EXCEL2007).adjustFormula(tokens, sheet);
+        if (fromColumn != toColumn) FormulaShifter.createForColumnCopy(sheet, name, fromColumn, fromColumn, toColumn - fromColumn, SpreadsheetVersion.EXCEL2007).adjustFormula(tokens, sheet);
+        return FormulaRenderer.toFormulaString(evaluator, tokens);
+    }
+    public static int replaceAll(Book book, int sheet, String find, String replacement, boolean matchCase, boolean formulas) {
+        if (find.isEmpty()) throw new IllegalArgumentException("찾을 내용을 입력하세요.");
+        var pattern = Pattern.compile(Pattern.quote(find), matchCase ? 0 : Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
+        int changed = 0;
+        for (var row : book.workbook().getSheetAt(sheet)) for (var cell : row) {
+            boolean formula = cell.getCellType() == CellType.FORMULA;
+            if (cell.getCellType() != CellType.STRING && !(formulas && formula)) continue;
+            String text = formula ? cell.getCellFormula() : cell.getStringCellValue();
+            String next = pattern.matcher(text).replaceAll(Matcher.quoteReplacement(replacement));
+            if (!text.equals(next)) {
+                if (formula) cell.setCellFormula(next); else cell.setCellValue(next);
+                changed++;
+            }
+        }
+        book.resetEvaluator(); return changed;
+    }
+}
