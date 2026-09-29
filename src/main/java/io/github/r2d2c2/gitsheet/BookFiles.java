@@ -30,10 +30,15 @@ public final class BookFiles {
                 var widths = new TreeMap<Integer, Integer>();
                 int lastColumn = 0;
                 for (var row : sheet) lastColumn = Math.max(lastColumn, row.getLastCellNum());
-                for (int c = 0; c < Math.max(100, lastColumn); c++) {
+                for (var group : ((XSSFSheet) sheet).getCTWorksheet().getColsList())
+                    for (var column : group.getColList()) lastColumn = Math.max(lastColumn, (int) column.getMax());
+                var hiddenColumns = new ArrayList<Integer>();
+                for (int c = 0; c < lastColumn; c++) {
                     if (sheet.getColumnWidth(c) != sheet.getDefaultColumnWidth() * 256) widths.put(c, sheet.getColumnWidth(c));
+                    if (sheet.isColumnHidden(c)) hiddenColumns.add(c);
                 }
                 record.add("widths", JSON.toJsonTree(widths));
+                if (!hiddenColumns.isEmpty()) record.add("hiddenColumns", JSON.toJsonTree(hiddenColumns));
                 var merges = sheet.getMergedRegions().stream().map(CellRangeAddress::formatAsString).toList();
                 record.add("merges", JSON.toJsonTree(merges));
                 var pane = sheet.getPaneInformation();
@@ -78,6 +83,7 @@ public final class BookFiles {
                         sheet.setDefaultColumnWidth(item.get("defaultColumnWidth").getAsInt());
                         sheet.setDefaultRowHeight(item.get("defaultRowHeight").getAsShort());
                         for (var entry : item.getAsJsonObject("widths").entrySet()) sheet.setColumnWidth(Integer.parseInt(entry.getKey()), entry.getValue().getAsInt());
+                        if (item.has("hiddenColumns")) for (var column : item.getAsJsonArray("hiddenColumns")) sheet.setColumnHidden(column.getAsInt(), true);
                         for (var merge : item.getAsJsonArray("merges")) sheet.addMergedRegion(CellRangeAddress.valueOf(merge.getAsString()));
                         if (item.has("freezeRows")) sheet.createFreezePane(item.get("freezeColumns").getAsInt(), item.get("freezeRows").getAsInt());
                     }

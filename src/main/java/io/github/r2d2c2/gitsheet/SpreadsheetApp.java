@@ -98,7 +98,12 @@ public final class SpreadsheetApp extends Application {
                     catch (Exception e) { error(e); }
                 })), item("열 너비", this::columnWidth));
         var sheet = new Menu("시트"); sheet.getItems().addAll(item("시트 추가", this::addSheet), item("시트 이름 변경", this::renameSheet),
-                item("시트 삭제", this::deleteSheet), item("이전 1,000행", () -> page(-1)), item("다음 1,000행", () -> page(1)));
+                item("시트 삭제", this::deleteSheet), new SeparatorMenuItem(),
+                item("선택 행 위에 삽입", () -> structuralEdit(StructuralEdits.Axis.ROW, true)),
+                item("선택 행 전체 삭제", () -> structuralEdit(StructuralEdits.Axis.ROW, false)),
+                item("선택 열 왼쪽에 삽입", () -> structuralEdit(StructuralEdits.Axis.COLUMN, true)),
+                item("선택 열 전체 삭제", () -> structuralEdit(StructuralEdits.Axis.COLUMN, false)),
+                new SeparatorMenuItem(), item("이전 1,000행", () -> page(-1)), item("다음 1,000행", () -> page(1)));
         var git = new Menu("Git"); git.getItems().addAll(item("서버 연결 / 동기화", this::gitConnect), item("문서 변경 내용 / 기록", this::gitInspect), item("문서 저장 후 커밋", this::gitCommit));
         var help = new Menu("도움말"); help.getItems().add(item("사용법 및 호환성", () -> textDialog("Git Sheet 0.2", "JDK 25 + JavaFX\n\n"
                 + "더블 클릭 / F2: 셀 편집 · Enter: 적용 · Escape: 취소\n수식: =SUM(A1:A10), =IF(B1>0,\"예\",\"아니오\")\n"
@@ -298,6 +303,20 @@ public final class SpreadsheetApp extends Application {
         int left = (Integer) grid.getColumns().get(b.firstCol()).getUserData(), right = (Integer) grid.getColumns().get(b.lastCol()).getUserData();
         mutate(() -> SheetEdits.fill(book, sheetIndex, first, last, left, right, direction));
     }
+    private void structuralEdit(StructuralEdits.Axis axis, boolean insert) {
+        if (pendingEdit != null && !pendingEdit.getAsBoolean()) return;
+        var positions = selectedPositions(); if (positions.isEmpty()) return;
+        if (!filter.getText().isBlank() || !grid.getSortOrder().isEmpty()) {
+            status.setText("행·열 삽입·삭제를 사용하려면 정렬과 필터를 먼저 해제하세요."); return;
+        }
+        var indexes = positions.stream().mapToInt(p -> axis == StructuralEdits.Axis.ROW ? p.row() : p.column()).distinct().sorted().toArray();
+        int first = indexes[0], count = indexes.length;
+        if (indexes[count - 1] - first + 1 != count) { status.setText("연속된 행 또는 열을 선택하세요."); return; }
+        if (mutate(() -> StructuralEdits.change(book, sheetIndex, axis, first, count, insert))) {
+            refresh();
+            status.setText(count + (axis == StructuralEdits.Axis.ROW ? "개 행" : "개 열") + (insert ? " 삽입 완료" : " 삭제 완료") + " · Ctrl+Z로 실행 취소");
+        }
+    }
     private void replaceAll() {
         var dialog = new Dialog<ButtonType>(); dialog.initOwner(stage); dialog.setTitle("찾기 및 바꾸기");
         var find = new TextField(); find.setPromptText("찾을 텍스트"); var replacement = new TextField(); replacement.setPromptText("바꿀 텍스트");
@@ -467,6 +486,13 @@ public final class SpreadsheetApp extends Application {
         filter.clear(); address.setText("AZ2001"); goTo();
         if (rowWindow != 2000 || !Objects.equals(selected(), new Position(2000, 51))) throw new IllegalStateException("Navigation failed");
         address.setText("A1"); goTo(); grid.applyCss(); grid.layout();
+        String original = book.raw(0, 0, 0);
+        structuralEdit(StructuralEdits.Axis.ROW, true);
+        if (!book.raw(0, 1, 0).equals(original) || !book.raw(0, 0, 0).isEmpty()) throw new IllegalStateException("Insert row failed");
+        undo(); address.setText("A1"); goTo();
+        structuralEdit(StructuralEdits.Axis.COLUMN, true);
+        if (!book.raw(0, 0, 1).equals(original)) throw new IllegalStateException("Insert column failed");
+        undo(); address.setText("A1"); goTo();
     }
     private void screenshot(Path path) throws IOException {
         var image = stage.getScene().getRoot().snapshot(null, null);
