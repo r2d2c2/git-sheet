@@ -1,0 +1,12 @@
+.root { -fx-font-family: "Segoe UI", "Malgun Gothic"; -fx-font-size: 13px; -fx-base: #f5f7fb; -fx-accent: #2563eb; -fx-focus-color: #2563eb; }
+.menu-bar { -fx-background-color: #12213a; -fx-padding: 5 8; }
+.menu-bar > .container > .menu-button > .label { -fx-text-fill: white; }
+.tool-bar { -fx-padding: 9 12; -fx-background-color: #edf2fa; -fx-spacing: 5; }
+.button { -fx-cursor: hand; -fx-background-radius: 5; -fx-padding: 6 10; }
+.table-view { -fx-background-color: white; -fx-padding: 0; -fx-table-cell-border-color: #e5e9f0; }
+.table-view .column-header { -fx-background-color: #e9eef7; -fx-size: 32; -fx-border-color: #d7dfec; -fx-border-width: 0 1 1 0; }
+.table-row-cell { -fx-background-color: white; }
+.table-cell { -fx-padding: 5 8; -fx-border-color: #e5e9f0; -fx-border-width: 0 1 1 0; }
+.table-cell:selected { -fx-background-color: #dbeafe; -fx-text-fill: #12386c; -fx-border-color: #2563eb; -fx-border-width: 1; }
+.tab-pane .tab-header-area .tab-header-background { -fx-background-color: #e9eef7; }
+.text-field { -fx-background-radius: 4; }

@@ -1,0 +1,4 @@
+* text=auto
+*.gsheet text eol=lf
+*.java text eol=lf
+*.xlsx binary
