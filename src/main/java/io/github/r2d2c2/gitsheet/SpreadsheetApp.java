@@ -30,6 +30,9 @@ public final class SpreadsheetApp extends Application {
     private String copyId;
     private record CutRange(int sheet, int row, int column, int rows, int columns) {}
     private CutRange pendingCut;
+    private RangeFilter.Spec rangeFilter;
+    private int filterOffset;
+    private List<Integer> filterMatches = List.of();
     private Stage stage;
     private Path document;
     private boolean dirty;
@@ -62,7 +65,7 @@ public final class SpreadsheetApp extends Application {
         tabs.setTabClosingPolicy(TabPane.TabClosingPolicy.UNAVAILABLE); tabs.setPrefHeight(40);
         tabs.setStyle("-fx-open-tab-animation: none; -fx-close-tab-animation: none;");
         tabs.getSelectionModel().selectedIndexProperty().addListener((_, _, index) -> {
-            if (!changingTabs && index.intValue() >= 0) { sheetIndex = index.intValue(); rowWindow = columnWindow = 0; refresh(); }
+            if (!changingTabs && index.intValue() >= 0) { rangeFilter = null; sheetIndex = index.intValue(); rowWindow = columnWindow = 0; refresh(); }
         });
         var foot = new HBox(20, status, selectionInfo); foot.setPadding(new Insets(8, 14, 8, 14));
         root.setBottom(new VBox(tabs, foot));
@@ -123,7 +126,8 @@ public final class SpreadsheetApp extends Application {
                 + ".gsheet 변환은 그림, 이름 정의, 유효성 검사, 조건부 서식 등 고급 Excel 요소를 보존하지 않습니다.\n"
                 + "병합·틀 고정 정보는 저장되지만 화면에는 반영되지 않습니다. 원본 .xlsx는 따로 보관하세요.\n"
                 + "외부 연결은 갱신하지 않으며 지원하지 않는 수식은 #UNSUPPORTED!로 표시됩니다.")));
-        var data = new Menu("데이터"); data.getItems().add(item("범위 데이터 정렬…", this::sortRange));
+        var data = new Menu("데이터"); data.getItems().addAll(item("범위 데이터 정렬…", this::sortRange),
+                item("열별 필터…", this::filterRange), item("열별 필터 해제", () -> { rangeFilter = null; filterOffset = 0; refreshRows(); }));
         return new MenuBar(file, edit, format, sheet, data, git, help);
     }
     private ToolBar toolbar() {
@@ -169,6 +173,21 @@ public final class SpreadsheetApp extends Application {
         refreshRows(); title();
     }
     private void refreshRows() {
+        filter.setDisable(rangeFilter != null);
+        if (rangeFilter != null) {
+            try {
+                filterMatches = RangeFilter.matchingRows(book, sheetIndex, rangeFilter);
+                filterOffset = Math.min(filterOffset, Math.max(0, ((filterMatches.size() - 1) / ROW_WINDOW) * ROW_WINDOW));
+                var rows = new ArrayList<Integer>();
+                if (rangeFilter.header()) rows.add(rangeFilter.range().getFirstRow());
+                rows.addAll(filterMatches.subList(filterOffset, Math.min(filterMatches.size(), filterOffset + ROW_WINDOW)));
+                grid.setItems(FXCollections.observableArrayList(rows));
+                status.setText("열별 필터 · 일치 %,d행 · 결과 페이지 %d · 시트 메뉴에서 이전/다음 1,000행".formatted(filterMatches.size(), filterOffset / ROW_WINDOW + 1));
+                if (!rows.isEmpty()) grid.getSelectionModel().select(0, grid.getColumns().get(1));
+                return;
+            } catch (Exception e) { rangeFilter = null; filter.setDisable(false); error(e); }
+        }
+        filterMatches = List.of();
         String needle = filter.getText().toLowerCase(Locale.ROOT);
         var rows = new ArrayList<Integer>(ROW_WINDOW);
         for (int r = rowWindow; r < Math.min(Book.MAX_ROWS, rowWindow + ROW_WINDOW); r++) {
@@ -208,7 +227,7 @@ public final class SpreadsheetApp extends Application {
         selectionInfo.setText("선택 %d셀 · 숫자 %d · 합계 %s".formatted(values.size(), count, Double.toString(sum)));
     }
     private boolean mutate(Runnable action) {
-        try { book.transaction(_ -> action.run()); pendingCut = null; dirty = true; grid.refresh(); title(); selectionChanged(); return true; }
+        try { book.transaction(_ -> action.run()); pendingCut = null; dirty = true; if (rangeFilter != null) refreshRows(); else grid.refresh(); title(); selectionChanged(); return true; }
         catch (Exception e) { error(e); grid.refresh(); return false; }
     }
     private void undo() { if (book.undo()) { pendingCut = null; dirty = true; refreshTabs(); refresh(); } }
@@ -290,7 +309,7 @@ public final class SpreadsheetApp extends Application {
     private void paste(CellClipboard.Mode mode) {
         if (pendingEdit != null && !pendingEdit.getAsBoolean()) return;
         var b = bounds(); var text = Clipboard.getSystemClipboard().getString(); if (b == null || text == null) return;
-        if (!filter.getText().isBlank() || !clipboardViewIsContiguous(new Bounds(0, grid.getItems().size() - 1, b.firstCol(), b.lastCol()))) {
+        if (rangeFilter != null || !filter.getText().isBlank() || !clipboardViewIsContiguous(new Bounds(0, grid.getItems().size() - 1, b.firstCol(), b.lastCol()))) {
             status.setText("붙여넣기를 사용하려면 정렬·필터를 먼저 해제하세요."); return;
         }
         if (cellClipboard != null && copyId != null && copyId.equals(Clipboard.getSystemClipboard().getContent(CELL_COPY))) {
@@ -326,11 +345,15 @@ public final class SpreadsheetApp extends Application {
         try {
             var ref = new CellReference(address.getText().trim().toUpperCase(Locale.ROOT));
             int r = ref.getRow(), c = ref.getCol(); book.cell(sheetIndex, r, c, false);
-            rowWindow = (r / ROW_WINDOW) * ROW_WINDOW; columnWindow = (c / COLUMN_WINDOW) * COLUMN_WINDOW; filter.clear(); refresh();
+            rangeFilter = null; rowWindow = (r / ROW_WINDOW) * ROW_WINDOW; columnWindow = (c / COLUMN_WINDOW) * COLUMN_WINDOW; filter.clear(); refresh();
             int index = r - rowWindow; grid.getSelectionModel().clearAndSelect(index, grid.getColumns().get(c - columnWindow + 1)); grid.scrollTo(index);
         } catch (Exception e) { error(new IllegalArgumentException("A1, Z10000처럼 올바른 셀 주소를 입력하세요.")); }
     }
-    private void page(int direction) { rowWindow = Math.clamp(rowWindow + direction * ROW_WINDOW, 0, ((Book.MAX_ROWS - 1) / ROW_WINDOW) * ROW_WINDOW); refreshRows(); }
+    private void page(int direction) {
+        if (rangeFilter != null) filterOffset = Math.clamp(filterOffset + direction * ROW_WINDOW, 0, Math.max(0, ((filterMatches.size() - 1) / ROW_WINDOW) * ROW_WINDOW));
+        else rowWindow = Math.clamp(rowWindow + direction * ROW_WINDOW, 0, ((Book.MAX_ROWS - 1) / ROW_WINDOW) * ROW_WINDOW);
+        refreshRows();
+    }
     private void sort(boolean descending) {
         var p = selected(); if (p == null) return;
         Comparator<Integer> comparator = (a, b) -> {
@@ -342,6 +365,45 @@ public final class SpreadsheetApp extends Application {
             return descending ? -comparison : comparison;
         };
         grid.getItems().sort(comparator); status.setText("현재 화면 정렬 · 원본 셀 주소와 수식은 유지됩니다.");
+    }
+    private void filterRange() {
+        if (pendingEdit != null && !pendingEdit.getAsBoolean()) return;
+        var b = bounds(); if (b == null) return;
+        int left = (Integer) grid.getColumns().get(b.firstCol()).getUserData();
+        int right = (Integer) grid.getColumns().get(b.lastCol()).getUserData();
+        var area = new TextField(rangeFilter == null ? Book.address(grid.getItems().get(b.firstRow()), left) + ":" + Book.address(grid.getItems().get(b.lastRow()), right) : rangeFilter.range().formatAsString());
+        area.setId("range-filter-area");
+        var header = new CheckBox("첫 행은 제목"); header.setSelected(rangeFilter == null || rangeFilter.header());
+        var form = new GridPane(); form.setHgap(8); form.setVgap(10); form.addRow(0, new Label("범위 (최대 10만 행)"), area);
+        form.add(header, 0, 1, 4, 1);
+        var enabled = new ArrayList<CheckBox>(); var columns = new ArrayList<TextField>();
+        var operations = new ArrayList<ComboBox<RangeFilter.Operation>>(); var operands = new ArrayList<TextField>();
+        for (int i = 0; i < 3; i++) {
+            var prior = rangeFilter != null && i < rangeFilter.conditions().size() ? rangeFilter.conditions().get(i) : null;
+            var active = new CheckBox("조건 " + (i + 1)); active.setSelected(prior != null || i == 0);
+            var column = new TextField(CellReference.convertNumToColString(prior == null ? left : prior.column())); column.setPrefColumnCount(3);
+            var operation = new ComboBox<RangeFilter.Operation>(FXCollections.observableArrayList(RangeFilter.Operation.values()));
+            operation.setValue(prior == null ? RangeFilter.Operation.CONTAINS : prior.operation());
+            var operand = new TextField(prior == null ? "" : prior.operand()); operand.setPromptText("비교할 값");
+            column.setId("range-filter-column-" + i); operand.setId("range-filter-value-" + i); operation.setId("range-filter-operation-" + i);
+            form.addRow(i + 2, active, column, operation, operand);
+            enabled.add(active); columns.add(column); operations.add(operation); operands.add(operand);
+        }
+        form.add(new Label("선택한 조건을 모두 만족하는 행만 표시합니다. 원본 데이터는 유지됩니다.\n문자는 대소문자 무시, 숫자 조건은 숫자 타입에만 적용합니다.\n결과는 1,000행씩 탐색하며 필터 설정은 파일에 저장하지 않습니다."), 0, 5, 4, 1);
+        var dialog = new Dialog<ButtonType>(); dialog.initOwner(stage); dialog.setTitle("열별 필터");
+        dialog.getDialogPane().setId("range-filter-dialog"); dialog.getDialogPane().setContent(form);
+        dialog.getDialogPane().getButtonTypes().addAll(ButtonType.OK, ButtonType.CANCEL);
+        dialog.showAndWait().filter(ButtonType.OK::equals).ifPresent(_ -> {
+            try {
+                var conditions = new ArrayList<RangeFilter.Condition>();
+                for (int i = 0; i < 3; i++) if (enabled.get(i).isSelected()) conditions.add(new RangeFilter.Condition(
+                        CellReference.convertColStringToIndex(columns.get(i).getText().trim().toUpperCase(Locale.ROOT)), operations.get(i).getValue(), operands.get(i).getText()));
+                var spec = new RangeFilter.Spec(org.apache.poi.ss.util.CellRangeAddress.valueOf(area.getText().trim().toUpperCase(Locale.ROOT)), header.isSelected(), conditions);
+                RangeFilter.matchingRows(book, sheetIndex, spec); // Validate before replacing an existing filter.
+                rangeFilter = spec; filterOffset = 0; filter.clear();
+                columnWindow = (spec.range().getFirstColumn() / COLUMN_WINDOW) * COLUMN_WINDOW; refresh();
+            } catch (Exception e) { error(e); }
+        });
     }
     private void sortRange() {
         if (pendingEdit != null && !pendingEdit.getAsBoolean()) return;
@@ -366,7 +428,7 @@ public final class SpreadsheetApp extends Application {
                 var area = org.apache.poi.ss.util.CellRangeAddress.valueOf(range.getText().trim().toUpperCase(Locale.ROOT));
                 int key = CellReference.convertColStringToIndex(column.getText().trim().toUpperCase(Locale.ROOT));
                 if (mutate(() -> RangeSort.sort(book, sheetIndex, area, key, header.isSelected(), descending.isSelected()))) {
-                    filter.clear(); refresh(); status.setText(area.formatAsString() + " 데이터 정렬 완료 · Ctrl+Z로 실행 취소");
+                    rangeFilter = null; filter.clear(); refresh(); status.setText(area.formatAsString() + " 데이터 정렬 완료 · Ctrl+Z로 실행 취소");
                 }
             } catch (Exception e) { error(e); }
         });
@@ -384,6 +446,7 @@ public final class SpreadsheetApp extends Application {
         });
     }
     private void fill(SheetEdits.Direction direction) {
+        if (rangeFilter != null) { status.setText("채우기를 사용하려면 열별 필터를 해제하세요."); return; }
         var b = bounds(); if (b == null) return;
         int first = grid.getItems().get(b.firstRow()), last = grid.getItems().get(b.lastRow());
         for (int r = b.firstRow(); r <= b.lastRow(); r++) {
@@ -395,7 +458,7 @@ public final class SpreadsheetApp extends Application {
     private void structuralEdit(StructuralEdits.Axis axis, boolean insert) {
         if (pendingEdit != null && !pendingEdit.getAsBoolean()) return;
         var positions = selectedPositions(); if (positions.isEmpty()) return;
-        if (!filter.getText().isBlank() || !grid.getSortOrder().isEmpty()) {
+        if (rangeFilter != null || !filter.getText().isBlank() || !grid.getSortOrder().isEmpty()) {
             status.setText("행·열 삽입·삭제를 사용하려면 정렬과 필터를 먼저 해제하세요."); return;
         }
         var indexes = positions.stream().mapToInt(p -> axis == StructuralEdits.Axis.ROW ? p.row() : p.column()).distinct().sorted().toArray();
@@ -428,7 +491,7 @@ public final class SpreadsheetApp extends Application {
     private void addSheet() {
         prompt("시트 추가", "새 시트 이름", "Sheet" + (book.workbook().getNumberOfSheets() + 1)).ifPresent(name -> {
             mutate(() -> { WorkbookUtil.validateSheetName(name); book.workbook().createSheet(name); });
-            sheetIndex = book.workbook().getNumberOfSheets() - 1; refreshTabs(); refresh();
+            rangeFilter = null; sheetIndex = book.workbook().getNumberOfSheets() - 1; refreshTabs(); refresh();
         });
     }
     private void renameSheet() {
@@ -439,7 +502,7 @@ public final class SpreadsheetApp extends Application {
     private void deleteSheet() {
         if (book.workbook().getNumberOfSheets() == 1) { status.setText("시트는 최소 한 개 필요합니다."); return; }
         if (confirm("시트 삭제", "현재 시트를 삭제할까요? 실행 취소로 복구할 수 있습니다.")) {
-            int deleting = sheetIndex; sheetIndex = 0;
+            rangeFilter = null; int deleting = sheetIndex; sheetIndex = 0;
             mutate(() -> book.workbook().removeSheetAt(deleting)); refreshTabs(); refresh();
         }
     }
@@ -493,6 +556,7 @@ public final class SpreadsheetApp extends Application {
         return answer == ButtonType.YES ? save(false) : answer == ButtonType.NO;
     }
     private void replace(Book next) {
+        rangeFilter = null;
         pendingCut = null;
         cellClipboard = null; copyId = null;
         try { book.close(); } catch (IOException ignored) { }
@@ -592,6 +656,32 @@ public final class SpreadsheetApp extends Application {
             throw new IllegalStateException("Range sort dialog failed");
         undo(); address.setText("A1"); goTo();
         String original = book.raw(0, 0, 0);
+        Platform.runLater(() -> {
+            try {
+                var pane = Window.getWindows().stream().filter(w -> w.getScene() != null)
+                        .map(w -> w.getScene().lookup("#range-filter-dialog")).filter(n -> n instanceof DialogPane)
+                        .map(n -> (DialogPane) n).findFirst().orElseThrow();
+                ((TextField) pane.lookup("#range-filter-area")).setText("A1:D4");
+                ((TextField) pane.lookup("#range-filter-column-0")).setText("A");
+                ((TextField) pane.lookup("#range-filter-value-0")).setText("마우스");
+                ((Button) pane.lookupButton(ButtonType.OK)).fire();
+            } catch (Exception e) { failSmoke(e); }
+        });
+        filterRange();
+        if (!grid.getItems().equals(List.of(0, 2))) throw new IllegalStateException("Column filter dialog failed");
+        mutate(() -> book.set(0, 2, 0, "renamed"));
+        if (!grid.getItems().equals(List.of(0))) throw new IllegalStateException("Filter did not refresh after editing");
+        undo(); if (!grid.getItems().equals(List.of(0, 2))) throw new IllegalStateException("Filter undo refresh failed");
+        book.transaction(x -> x.workbook().createSheet("Filter smoke")); refreshTabs(); tabs.getSelectionModel().select(1);
+        if (rangeFilter != null) throw new IllegalStateException("Filter survived sheet switch");
+        undo(); address.setText("A1"); goTo();
+        rangeFilter = new RangeFilter.Spec(org.apache.poi.ss.util.CellRangeAddress.valueOf("A1:A2005"), true,
+                List.of(new RangeFilter.Condition(0, RangeFilter.Operation.BLANK, "")));
+        filterOffset = 0; refreshRows();
+        if (grid.getItems().get(1) != 5) throw new IllegalStateException("Filter first result page failed");
+        page(1); if (grid.getItems().get(1) != 1005) throw new IllegalStateException("Filter next result page failed");
+        rangeFilter = null; refreshRows();
+        if (grid.getItems().get(1) != 1 || filter.isDisabled()) throw new IllegalStateException("Filter clear failed");
         pendingCut = new CutRange(0, 0, 0, 1, 1);
         pasteCut(pendingCut, 15, 0);
         if (pendingCut != null || !book.raw(0, 0, 0).isEmpty() || !book.raw(0, 15, 0).equals(original)) throw new IllegalStateException("Cut paste failed");
