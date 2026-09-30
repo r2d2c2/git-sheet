@@ -977,8 +977,12 @@ public final class SpreadsheetApp extends Application {
         actions.get("mergeCells").run(); smokeLayout();
         if (mergeLayer.getChildren().size() != 1) throw new IllegalStateException("Merge overlay missing");
         var label = (Label) mergeLayer.getChildren().getFirst();
-        if (!label.getText().equals("Merged title") || label.getWidth() < smokeCell(9, 0).getWidth() * 1.9
-                || label.getHeight() < smokeCell(9, 0).getHeight() * 1.9) throw new IllegalStateException("Merge span incorrect");
+        double expectedWidth = smokeCell(9, 0).getWidth() + smokeCell(9, 1).getWidth();
+        double expectedHeight = smokeCell(9, 0).getHeight() + smokeCell(10, 0).getHeight();
+        if (!label.getText().equals("Merged title") || Math.abs(label.getWidth() - expectedWidth) > 2
+                || Math.abs(label.getHeight() - expectedHeight) > 2)
+            throw new IllegalStateException("Merge span incorrect: " + label.getWidth() + "x" + label.getHeight()
+                    + " expected " + expectedWidth + "x" + expectedHeight);
         screenshot(Path.of("build/merged-cell-smoke.png"));
         grid.scrollTo(50); smokeLayout();
         if (!mergeLayer.getChildren().isEmpty()) throw new IllegalStateException("Offscreen merge remained visible");
