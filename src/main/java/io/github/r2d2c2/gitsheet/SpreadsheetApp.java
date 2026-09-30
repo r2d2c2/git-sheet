@@ -9,6 +9,7 @@ import javafx.scene.Scene;
 import javafx.scene.chart.*;
 import javafx.scene.control.*;
 import javafx.scene.input.*;
+import javafx.scene.input.DataFormat;
 import javafx.scene.layout.*;
 import javafx.stage.*;
 import org.apache.poi.ss.usermodel.*;
@@ -24,6 +25,9 @@ import java.util.function.BooleanSupplier;
 
 public final class SpreadsheetApp extends Application {
     private Book book = new Book();
+    private static final DataFormat CELL_COPY = new DataFormat("application/x-git-sheet-copy-id");
+    private CellClipboard cellClipboard;
+    private String copyId;
     private Stage stage;
     private Path document;
     private boolean dirty;
@@ -88,7 +92,9 @@ public final class SpreadsheetApp extends Application {
                 item("저장", () -> save(false)), item("다른 이름으로 저장", () -> save(true)), new SeparatorMenuItem(),
                 item("Excel 내보내기 (.xlsx)", () -> export(false)), item("현재 시트 CSV 내보내기", () -> export(true)));
         var edit = new Menu("편집"); edit.getItems().addAll(item("실행 취소  Ctrl+Z", this::undo), item("다시 실행  Ctrl+Y", this::redo),
-                item("복사  Ctrl+C", this::copy), item("붙여넣기  Ctrl+V", this::paste), item("내용 지우기", this::clear), item("찾기", this::find), item("찾기 및 바꾸기", this::replaceAll),
+                item("복사  Ctrl+C", this::copy), item("붙여넣기  Ctrl+V", this::paste),
+                item("값만 붙여넣기", () -> paste(CellClipboard.Mode.VALUES)), item("서식만 붙여넣기", () -> paste(CellClipboard.Mode.FORMATS)),
+                item("내용 지우기", this::clear), item("찾기", this::find), item("찾기 및 바꾸기", this::replaceAll),
                 new SeparatorMenuItem(), item("아래로 채우기  Ctrl+D", () -> fill(SheetEdits.Direction.DOWN)), item("오른쪽 채우기  Ctrl+R", () -> fill(SheetEdits.Direction.RIGHT)));
         var format = new Menu("서식"); format.getItems().addAll(
                 item("왼쪽 정렬", () -> applyStyle("align", "LEFT")), item("가운데 정렬", () -> applyStyle("align", "CENTER")), item("오른쪽 정렬", () -> applyStyle("align", "RIGHT")),
@@ -190,7 +196,7 @@ public final class SpreadsheetApp extends Application {
     }
     private void selectionChanged() {
         var p = selected(); if (p == null) return;
-        address.setText(Book.address(p.row(), p.column())); formula.setText(book.raw(sheetIndex, p.row(), p.column()));
+        address.setText(Book.address(p.row(), p.column())); formula.setText(book.input(sheetIndex, p.row(), p.column()));
         var values = selectedPositions(); double sum = 0; int count = 0;
         for (var cell : values) {
             try { sum += Double.parseDouble(book.raw(sheetIndex, cell.row(), cell.column())); count++; }
@@ -233,7 +239,9 @@ public final class SpreadsheetApp extends Application {
                 cells.stream().mapToInt(TablePosition::getColumn).min().orElse(1), cells.stream().mapToInt(TablePosition::getColumn).max().orElse(1));
     }
     private void copy() {
+        if (pendingEdit != null && !pendingEdit.getAsBoolean()) return;
         var b = bounds(); if (b == null) return;
+        if (!clipboardViewIsContiguous(b)) return;
         var text = new StringBuilder();
         for (int r = b.firstRow(); r <= b.lastRow(); r++) {
             if (r > b.firstRow()) text.append('\n');
@@ -243,13 +251,36 @@ public final class SpreadsheetApp extends Application {
                 text.append(quoteTsv(value));
             }
         }
-        var content = new ClipboardContent(); content.putString(text.toString()); Clipboard.getSystemClipboard().setContent(content);
+        try {
+            var snapshot = new CellClipboard(book, sheetIndex, grid.getItems().get(b.firstRow()),
+                    (Integer) grid.getColumns().get(b.firstCol()).getUserData(), b.lastRow() - b.firstRow() + 1, b.lastCol() - b.firstCol() + 1);
+            String id = UUID.randomUUID().toString();
+            var content = new ClipboardContent(); content.putString(text.toString()); content.put(CELL_COPY, id);
+            if (Clipboard.getSystemClipboard().setContent(content)) { cellClipboard = snapshot; copyId = id; }
+        } catch (Exception e) { error(e); }
+    }
+    private boolean clipboardViewIsContiguous(Bounds b) {
+        int first = grid.getItems().get(b.firstRow());
+        for (int r = b.firstRow(); r <= b.lastRow(); r++) if (grid.getItems().get(r) != first + r - b.firstRow()) {
+            status.setText("복사·붙여넣기를 사용하려면 정렬·필터를 해제하고 연속 범위를 선택하세요."); return false;
+        }
+        return true;
     }
     private static String quoteTsv(String value) {
         return value.contains("\t") || value.contains("\n") || value.contains("\"") ? "\"" + value.replace("\"", "\"\"") + "\"" : value;
     }
-    private void paste() {
+    private void paste() { paste(CellClipboard.Mode.ALL); }
+    private void paste(CellClipboard.Mode mode) {
+        if (pendingEdit != null && !pendingEdit.getAsBoolean()) return;
         var b = bounds(); var text = Clipboard.getSystemClipboard().getString(); if (b == null || text == null) return;
+        if (!filter.getText().isBlank() || !clipboardViewIsContiguous(new Bounds(0, grid.getItems().size() - 1, b.firstCol(), b.lastCol()))) {
+            status.setText("붙여넣기를 사용하려면 정렬·필터를 먼저 해제하세요."); return;
+        }
+        if (cellClipboard != null && copyId != null && copyId.equals(Clipboard.getSystemClipboard().getContent(CELL_COPY))) {
+            mutate(() -> cellClipboard.paste(book, sheetIndex, grid.getItems().get(b.firstRow()),
+                    (Integer) grid.getColumns().get(b.firstCol()).getUserData(), mode)); return;
+        }
+        if (mode == CellClipboard.Mode.FORMATS) { status.setText("서식 붙여넣기는 이 문서에서 복사한 셀에 사용할 수 있습니다."); return; }
         try (var parser = org.apache.commons.csv.CSVFormat.TDF.parse(new StringReader(text))) {
             var rows = parser.getRecords();
             int start = b.firstRow();
@@ -257,7 +288,8 @@ public final class SpreadsheetApp extends Application {
             int firstCol = (Integer) grid.getColumns().get(b.firstCol()).getUserData();
             if (rows.stream().anyMatch(r -> firstCol + r.size() > Book.MAX_COLUMNS)) throw new IllegalArgumentException("최대 열 범위를 넘습니다.");
             mutate(() -> { for (int r = 0; r < rows.size(); r++) for (int c = 0; c < rows.get(r).size(); c++)
-                book.set(sheetIndex, grid.getItems().get(start + r), firstCol + c, rows.get(r).get(c)); });
+                book.set(sheetIndex, grid.getItems().get(start + r), firstCol + c,
+                        mode == CellClipboard.Mode.VALUES ? "'" + rows.get(r).get(c) : rows.get(r).get(c)); });
         } catch (Exception e) { error(e); }
     }
     private void clear() { var positions = selectedPositions(); if (!positions.isEmpty()) mutate(() -> positions.forEach(p -> book.set(sheetIndex, p.row(), p.column(), ""))); }
@@ -404,6 +436,7 @@ public final class SpreadsheetApp extends Application {
         return answer == ButtonType.YES ? save(false) : answer == ButtonType.NO;
     }
     private void replace(Book next) {
+        cellClipboard = null; copyId = null;
         try { book.close(); } catch (IOException ignored) { }
         book = next;
     }
@@ -490,6 +523,12 @@ public final class SpreadsheetApp extends Application {
         structuralEdit(StructuralEdits.Axis.ROW, true);
         if (!book.raw(0, 1, 0).equals(original) || !book.raw(0, 0, 0).isEmpty()) throw new IllegalStateException("Insert row failed");
         undo(); address.setText("A1"); goTo();
+        book.transaction(x -> x.set(0, 0, 0, "'=literal")); refresh();
+        grid.getSelectionModel().clearAndSelect(0, grid.getColumns().get(1));
+        grid.edit(0, grid.getColumns().get(1)); grid.applyCss(); grid.layout();
+        if (pendingEdit == null || !pendingEdit.getAsBoolean() || book.cell(0, 0, 0, false).getCellType() != CellType.STRING
+                || !book.raw(0, 0, 0).equals("=literal")) throw new IllegalStateException("Literal text editing failed");
+        undo(); undo(); address.setText("A1"); goTo();
         structuralEdit(StructuralEdits.Axis.COLUMN, true);
         if (!book.raw(0, 0, 1).equals(original)) throw new IllegalStateException("Insert column failed");
         undo(); address.setText("A1"); goTo();
@@ -565,7 +604,7 @@ public final class SpreadsheetApp extends Application {
         @Override public void startEdit() {
             if (isEmpty()) return;
             super.startEdit(); int row = getTableRow().getItem();
-            editor = new TextField(book.raw(sheetIndex, row, column));
+            editor = new TextField(book.input(sheetIndex, row, column));
             pendingEdit = () -> finish(row);
             editor.setOnAction(_ -> finish(row)); editor.setOnKeyPressed(event -> { if (event.getCode() == KeyCode.ESCAPE) { cancelEdit(); event.consume(); } });
             editor.focusedProperty().addListener((_, _, focus) -> { if (!focus && isEditing()) finish(row); });

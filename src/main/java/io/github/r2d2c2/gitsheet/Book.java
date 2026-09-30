@@ -42,6 +42,11 @@ public final class Book implements AutoCloseable {
             default -> "";
         };
     }
+    public String input(int sheet, int row, int col) {
+        var cell = cell(sheet, row, col, false);
+        String value = raw(sheet, row, col);
+        return cell != null && cell.getCellType() == CellType.STRING ? "'" + value : value;
+    }
     public String display(int sheet, int row, int col) {
         var cell = cell(sheet, row, col, false);
         if (cell == null) return "";
