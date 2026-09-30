@@ -47,6 +47,8 @@
               <MenuItem text="열 너비" userData="columnWidth" onAction="#dispatchAction"/>
               <MenuItem text="행 높이…" userData="rowHeight" onAction="#dispatchAction"/>
               <MenuItem text="행 높이 자동" userData="autoRowHeight" onAction="#dispatchAction"/>
+              <MenuItem text="셀 병합" userData="mergeCells" onAction="#dispatchAction"/>
+              <MenuItem text="병합 해제" userData="unmergeCells" onAction="#dispatchAction"/>
               <MenuItem text="셀 줄바꿈 켜기" userData="wrapOn" onAction="#dispatchAction"/>
               <MenuItem text="셀 줄바꿈 끄기" userData="wrapOff" onAction="#dispatchAction"/>
             </items>
@@ -116,7 +118,10 @@
     </VBox>
   </top>
   <center>
-    <TableView fx:id="grid" editable="true"/>
+    <StackPane>
+      <TableView fx:id="grid" editable="true"/>
+      <Pane fx:id="mergeLayer" pickOnBounds="false"/>
+    </StackPane>
   </center>
   <bottom>
     <VBox>

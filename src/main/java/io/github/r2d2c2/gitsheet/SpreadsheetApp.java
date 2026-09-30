@@ -42,6 +42,9 @@ public final class SpreadsheetApp extends Application {
     private static final int ROW_WINDOW = 1000, COLUMN_WINDOW = 52;
     @FXML private TableView<Integer> grid;
     @FXML private TabPane tabs;
+    @FXML private Pane mergeLayer;
+    private boolean mergePaintPending;
+    private final Map<String, Label> mergeLabels = new HashMap<>();
     @FXML private TextField address, filter;
     @FXML private TextArea formula;
     @FXML private Label status, selectionInfo;
@@ -63,6 +66,12 @@ public final class SpreadsheetApp extends Application {
         loader.setController(this);
         BorderPane root = loader.load();
         bindActions(); configureInputs();
+        grid.needsLayoutProperty().addListener((_, _, needed) -> { if (needed) requestMergePaint(); });
+        grid.addEventHandler(ScrollEvent.SCROLL, _ -> requestMergePaint());
+        grid.addEventHandler(MouseEvent.MOUSE_DRAGGED, _ -> requestMergePaint());
+        grid.editingCellProperty().addListener((_, _, _) -> requestMergePaint());
+        mergeLayer.widthProperty().addListener((_, _, _) -> requestMergePaint());
+        mergeLayer.heightProperty().addListener((_, _, _) -> requestMergePaint());
         grid.setEditable(true); grid.setFixedCellSize(-1); grid.getSelectionModel().setCellSelectionEnabled(true);
         rowLayoutRefresh.setOnFinished(_ -> grid.refresh());
         grid.setRowFactory(_ -> new TableRow<>() {
@@ -119,6 +128,7 @@ public final class SpreadsheetApp extends Application {
                     if (grid.getColumns().size() != COLUMN_WINDOW + 1 || !book.display(0, 4, 3).equals("₩660,000"))
                         throw new IllegalStateException("UI smoke test failed: " + book.display(0, 4, 3));
                     smokeTest();
+                    smokeMergedCells();
                     smokeSaveAndGit();
                 } catch (Exception e) { failSmoke(e); }
             });
@@ -156,6 +166,8 @@ public final class SpreadsheetApp extends Application {
         actions.put("columnWidth", this::columnWidth);
         actions.put("rowHeight", this::rowHeight);
         actions.put("autoRowHeight", () -> applyRowHeight(null));
+        actions.put("mergeCells", () -> changeMerge(false));
+        actions.put("unmergeCells", () -> changeMerge(true));
         actions.put("wrapOn", () -> applyStyle("wrap", "true"));
         actions.put("wrapOff", () -> applyStyle("wrap", "false"));
         actions.put("addSheet", this::addSheet);
@@ -178,7 +190,7 @@ public final class SpreadsheetApp extends Application {
                 + "지원: 값, POI 지원 수식, 기본 서식, 다중 시트, CSV/XLSX, 실행 취소, Git diff/commit, 간단한 차트\n"
                 + "제한: Excel 완전 호환 제품이 아닙니다. VBA, Power Query, 피벗, 협업, 고급 차트 및 동적 배열 미지원.\n"
                 + ".gsheet 변환은 그림, 이름 정의, 유효성 검사, 조건부 서식 등 고급 Excel 요소를 보존하지 않습니다.\n"
-                + "병합·틀 고정 정보는 저장되지만 화면에는 반영되지 않습니다. 원본 .xlsx는 따로 보관하세요.\n"
+                + "병합은 표시·편집을 지원하며 틀 고정은 저장만 지원합니다. 원본 .xlsx는 따로 보관하세요.\n"
                 + "외부 연결은 갱신하지 않으며 지원하지 않는 수식은 #UNSUPPORTED!로 표시됩니다."));
         actions.put("sortRange", this::sortRange);
         actions.put("filterRange", this::filterRange);
@@ -218,12 +230,12 @@ public final class SpreadsheetApp extends Application {
     }
     private void refresh() {
         grid.getColumns().clear();
-        var numbers = new TableColumn<Integer, String>("#"); numbers.setPrefWidth(64); numbers.setSortable(false); numbers.setEditable(false);
+        var numbers = new TableColumn<Integer, String>("#"); numbers.setPrefWidth(64); numbers.setSortable(false); numbers.setEditable(false); numbers.setReorderable(false);
         numbers.setCellValueFactory(data -> new ReadOnlyStringWrapper(Integer.toString(data.getValue() + 1))); grid.getColumns().add(numbers);
         for (int c = columnWindow; c < Math.min(Book.MAX_COLUMNS, columnWindow + COLUMN_WINDOW); c++) {
             final int columnIndex = c;
             var column = new TableColumn<Integer, String>(CellReference.convertNumToColString(c));
-            column.setUserData(c); column.setSortable(false);
+            column.setUserData(c); column.setSortable(false); column.setReorderable(false);
             column.setMinWidth(24); column.setPrefWidth(Math.max(24, book.workbook().getSheetAt(sheetIndex).getColumnWidthInPixels(c)));
             column.widthProperty().addListener((_, _, _) -> rowLayoutRefresh.playFromStart());
             column.setCellValueFactory(data -> new ReadOnlyStringWrapper(book.display(sheetIndex, data.getValue(), columnIndex)));
@@ -233,7 +245,9 @@ public final class SpreadsheetApp extends Application {
         refreshRows(); title();
     }
     private void refreshRows() {
-        filter.setDisable(rangeFilter != null);
+        if (book.workbook().getSheetAt(sheetIndex).getNumMergedRegions() > 0) { rangeFilter = null; filter.clear(); }
+        requestMergePaint();
+        filter.setDisable(rangeFilter != null || book.workbook().getSheetAt(sheetIndex).getNumMergedRegions() > 0);
         if (rangeFilter != null) {
             try {
                 filterMatches = RangeFilter.matchingRows(book, sheetIndex, rangeFilter);
@@ -266,7 +280,7 @@ public final class SpreadsheetApp extends Application {
         if (cells.isEmpty()) return null;
         var selected = cells.getLast();
         if (selected.getRow() < 0 || selected.getRow() >= grid.getItems().size() || selected.getColumn() < 1) return null;
-        return new Position(grid.getItems().get(selected.getRow()), (Integer) selected.getTableColumn().getUserData());
+        return mergeAnchor(grid.getItems().get(selected.getRow()), (Integer) selected.getTableColumn().getUserData());
     }
     private List<Position> selectedPositions() {
         var positions = new ArrayList<Position>();
@@ -276,10 +290,103 @@ public final class SpreadsheetApp extends Application {
         }
         return positions;
     }
+    private void changeMerge(boolean remove) {
+        if (pendingEdit != null && !pendingEdit.getAsBoolean()) return;
+        var b = bounds(); if (b == null || !clipboardViewIsContiguous(b)) return;
+        if (rangeFilter != null || !filter.getText().isBlank()) { status.setText("필터를 해제한 뒤 병합을 변경하세요."); return; }
+        var range = new org.apache.poi.ss.util.CellRangeAddress(grid.getItems().get(b.firstRow()), grid.getItems().get(b.lastRow()),
+                (Integer) grid.getColumns().get(b.firstCol()).getUserData(), (Integer) grid.getColumns().get(b.lastCol()).getUserData());
+        if (!remove && selectedPositions().size() != range.getNumberOfCells()) { status.setText("빈틈 없는 직사각형 범위를 선택하세요."); return; }
+        if (mutate(() -> { if (remove) MergeEdits.unmerge(book, sheetIndex, range); else MergeEdits.merge(book, sheetIndex, range); })) {
+            refreshRows(); focusMergeAnchor(new Position(range.getFirstRow(), range.getFirstColumn()), false);
+            status.setText(remove ? "병합 해제 완료" : "병합 완료 · 좌상단 셀에서 편집합니다.");
+        }
+    }
+    private void focusMergeAnchor(Position p, boolean edit) {
+        int row = grid.getItems().indexOf(p.row());
+        var column = grid.getColumns().stream().filter(c -> Objects.equals(c.getUserData(), p.column())).findFirst().orElse(null);
+        if (row < 0 || column == null) {
+            address.setText(Book.address(p.row(), p.column())); goTo();
+            row = grid.getItems().indexOf(p.row());
+            column = grid.getColumns().stream().filter(c -> Objects.equals(c.getUserData(), p.column())).findFirst().orElse(null);
+        }
+        if (row < 0 || column == null) return;
+        grid.getSelectionModel().clearAndSelect(row, column); grid.getFocusModel().focus(row, column);
+        grid.scrollTo(row); grid.scrollToColumn(column); grid.requestFocus();
+        grid.applyCss(); grid.layout();
+        if (edit) grid.edit(row, column);
+        requestMergePaint();
+    }
+    private void requestMergePaint() {
+        if (mergeLayer == null || mergePaintPending) return;
+        mergePaintPending = true;
+        Platform.runLater(() -> { try { paintMerges(); } finally { mergePaintPending = false; } });
+    }
+    private void paintMerges() {
+        if (grid.getScene() == null) return;
+        var sheet = book.workbook().getSheetAt(sheetIndex);
+        var ranges = sheet.getMergedRegions();
+        if (ranges.isEmpty()) { mergeLayer.getChildren().clear(); mergeLabels.clear(); return; }
+        grid.applyCss(); grid.layout();
+        var flow = grid.lookup(".virtual-flow");
+        if (flow == null) return;
+        var viewport = mergeLayer.sceneToLocal(flow.localToScene(flow.getBoundsInLocal()));
+        double right = viewport.getMaxX(), bottom = viewport.getMaxY();
+        for (var node : grid.lookupAll(".scroll-bar")) if (node instanceof ScrollBar bar && bar.isVisible()) {
+            var bound = mergeLayer.sceneToLocal(bar.localToScene(bar.getBoundsInLocal()));
+            if (bar.getOrientation() == javafx.geometry.Orientation.VERTICAL) right = Math.min(right, bound.getMinX());
+            else bottom = Math.min(bottom, bound.getMinY());
+        }
+        var clip = mergeLayer.getClip() instanceof javafx.scene.shape.Rectangle rectangle ? rectangle : new javafx.scene.shape.Rectangle();
+        clip.setX(viewport.getMinX()); clip.setY(viewport.getMinY());
+        clip.setWidth(Math.max(0, right - viewport.getMinX())); clip.setHeight(Math.max(0, bottom - viewport.getMinY()));
+        if (mergeLayer.getClip() != clip) mergeLayer.setClip(clip);
+        var visible = grid.lookupAll(".table-cell").stream().filter(n -> n instanceof GridCell cell && !cell.isEmpty()
+                && cell.getTableRow() != null && cell.getTableRow().getItem() != null).map(n -> (GridCell)n).toList();
+        var active = selected();
+        var children = new ArrayList<javafx.scene.Node>(); var keys = new HashSet<String>();
+        for (var range : ranges) {
+            double x = Double.POSITIVE_INFINITY, y = Double.POSITIVE_INFINITY, x2 = Double.NEGATIVE_INFINITY, y2 = Double.NEGATIVE_INFINITY;
+            boolean editing = false;
+            for (var cell : visible) if (range.isInRange(cell.getTableRow().getItem(), cell.column)) {
+                editing |= cell.isEditing();
+                var b = mergeLayer.sceneToLocal(cell.localToScene(cell.getBoundsInLocal()));
+                x = Math.min(x, b.getMinX()); y = Math.min(y, b.getMinY()); x2 = Math.max(x2, b.getMaxX()); y2 = Math.max(y2, b.getMaxY());
+            }
+            if (editing || !Double.isFinite(x) || x2 <= viewport.getMinX() || y2 <= viewport.getMinY() || x >= right || y >= bottom) continue;
+            String key = range.formatAsString(); keys.add(key);
+            var label = mergeLabels.computeIfAbsent(key, _ -> {
+                var result = new Label(); result.setManaged(false); result.setPadding(new Insets(4));
+                result.setOnMousePressed(event -> {
+                    if (event.getButton() == MouseButton.PRIMARY) {
+                        focusMergeAnchor(new Position(range.getFirstRow(), range.getFirstColumn()), event.getClickCount() >= 2); event.consume();
+                    }
+                });
+                return result;
+            });
+            var cell = book.cell(sheetIndex, range.getFirstRow(), range.getFirstColumn(), false);
+            label.setText(book.display(sheetIndex, range.getFirstRow(), range.getFirstColumn()));
+            label.setWrapText(cell != null && cell.getCellStyle().getWrapText());
+            boolean selected = active != null && range.isInRange(active.row(), active.column());
+            label.setStyle("-fx-background-color:white;-fx-text-fill:#172033;-fx-alignment:CENTER-LEFT;" + cellCss(cell, selected)
+                    + (selected ? "-fx-background-color:#dbeafe;-fx-border-color:#2563eb;" : "-fx-border-color:#cbd5e1;") + "-fx-border-width:1;");
+            label.resizeRelocate(x, y, x2-x, y2-y); children.add(label);
+        }
+        mergeLabels.keySet().retainAll(keys);
+        if (!mergeLayer.getChildren().equals(children)) mergeLayer.getChildren().setAll(children);
+    }
+    private Position mergeAnchor(int row, int column) {
+        var merge = MergeEdits.containing(book.workbook().getSheetAt(sheetIndex), row, column);
+        return merge == null ? new Position(row, column) : new Position(merge.getFirstRow(), merge.getFirstColumn());
+    }
+    private List<Position> editablePositions() {
+        return selectedPositions().stream().map(p -> mergeAnchor(p.row(), p.column())).distinct().toList();
+    }
     private void selectionChanged() {
+        requestMergePaint();
         var p = selected(); if (p == null) return;
         address.setText(Book.address(p.row(), p.column())); formula.setText(book.input(sheetIndex, p.row(), p.column()));
-        var values = selectedPositions(); double sum = 0; int count = 0;
+        var values = editablePositions(); double sum = 0; int count = 0;
         for (var cell : values) {
             try { sum += Double.parseDouble(book.raw(sheetIndex, cell.row(), cell.column())); count++; }
             catch (NumberFormatException ignored) { }
@@ -293,7 +400,7 @@ public final class SpreadsheetApp extends Application {
     private void undo() { if (book.undo()) { pendingCut = null; dirty = true; refreshTabs(); refresh(); } }
     private void redo() { if (book.redo()) { pendingCut = null; dirty = true; refreshTabs(); refresh(); } }
     private void applyStyle(String property, String value) {
-        var positions = selectedPositions(); if (positions.isEmpty()) return;
+        var positions = editablePositions(); if (positions.isEmpty()) return;
         mutate(() -> positions.forEach(p -> book.style(sheetIndex, p.row(), p.column(), property, value)));
     }
     private void toggleFont(String property) {
@@ -314,7 +421,8 @@ public final class SpreadsheetApp extends Application {
     private TextArea beginTyping() {
         var focus = grid.getFocusModel().getFocusedCell();
         if (focus.getRow() < 0 || focus.getColumn() <= 0) return null;
-        grid.edit(focus.getRow(), focus.getTableColumn());
+        var anchor = mergeAnchor(grid.getItems().get(focus.getRow()), (Integer) focus.getTableColumn().getUserData());
+        focusMergeAnchor(anchor, true);
         for (var node : grid.lookupAll(".table-cell")) {
             if (node instanceof GridCell cell && cell.isEditing()) {
                 cell.editor.clear(); cell.editor.applyCss(); return cell.editor;
@@ -333,7 +441,7 @@ public final class SpreadsheetApp extends Application {
         } else if (event.getCode() == KeyCode.ESCAPE && pendingCut != null) { pendingCut = null; status.setText("잘라내기를 취소했습니다. 복사한 내용은 유지됩니다."); event.consume(); }
         else if (event.getCode() == KeyCode.DELETE || event.getCode() == KeyCode.BACK_SPACE) { clear(); event.consume(); }
         else if (event.getCode() == KeyCode.F2 || event.getCode() == KeyCode.ENTER) {
-            var focus = grid.getFocusModel().getFocusedCell(); grid.edit(focus.getRow(), focus.getTableColumn()); event.consume();
+            var p = selected(); if (p != null) focusMergeAnchor(p, true); event.consume();
         }
     }
     private Bounds bounds() {
@@ -420,7 +528,7 @@ public final class SpreadsheetApp extends Application {
             cellClipboard = null; copyId = null; status.setText("셀 이동 완료 · 참조 갱신 · Ctrl+Z로 실행 취소");
         }
     }
-    private void clear() { var positions = selectedPositions(); if (!positions.isEmpty()) mutate(() -> positions.forEach(p -> book.set(sheetIndex, p.row(), p.column(), ""))); }
+    private void clear() { var positions = editablePositions(); if (!positions.isEmpty()) mutate(() -> positions.forEach(p -> book.set(sheetIndex, p.row(), p.column(), ""))); }
     private void goTo() {
         try {
             var ref = new CellReference(address.getText().trim().toUpperCase(Locale.ROOT));
@@ -435,6 +543,7 @@ public final class SpreadsheetApp extends Application {
         refreshRows();
     }
     private void sort(boolean descending) {
+        if (book.workbook().getSheetAt(sheetIndex).getNumMergedRegions() > 0) { status.setText("병합을 해제한 뒤 화면 정렬을 사용하세요."); return; }
         var p = selected(); if (p == null) return;
         Comparator<Integer> comparator = (a, b) -> {
             var x = book.raw(sheetIndex, a, p.column()); var y = book.raw(sheetIndex, b, p.column());
@@ -447,6 +556,7 @@ public final class SpreadsheetApp extends Application {
         grid.getItems().sort(comparator); status.setText("현재 화면 정렬 · 원본 셀 주소와 수식은 유지됩니다.");
     }
     private void filterRange() {
+        if (book.workbook().getSheetAt(sheetIndex).getNumMergedRegions() > 0) { status.setText("병합을 해제한 뒤 열별 필터를 사용하세요."); return; }
         if (pendingEdit != null && !pendingEdit.getAsBoolean()) return;
         var b = bounds(); if (b == null) return;
         int left = (Integer) grid.getColumns().get(b.firstCol()).getUserData();
@@ -825,7 +935,25 @@ public final class SpreadsheetApp extends Application {
         if (!book.raw(0, 0, 1).equals(original)) throw new IllegalStateException("Insert column failed");
         undo(); address.setText("A1"); goTo();
     }
-    private void smokeLayout() { stage.getScene().getRoot().applyCss(); stage.getScene().getRoot().layout(); grid.layout(); }
+    private String cellCss(org.apache.poi.ss.usermodel.Cell cell, boolean selected) {
+        if (cell == null) return "";
+            var style = cell.getCellStyle(); var font = book.workbook().getFontAt(style.getFontIndex());
+            var css = new StringBuilder("-fx-font-weight:").append(font.getBold() ? "bold" : "normal").append(";-fx-font-style:").append(font.getItalic() ? "italic" : "normal").append(';');
+            if (style instanceof org.apache.poi.xssf.usermodel.XSSFCellStyle xs && style.getFillPattern() == FillPatternType.SOLID_FOREGROUND && !selected) {
+                var color = xs.getFillForegroundXSSFColor(); var rgb = color == null ? null : color.getRGB();
+                if (rgb != null) css.append("-fx-background-color:#").append(HexFormat.of().formatHex(rgb)).append(';');
+            }
+            css.append("-fx-font-size:").append(font.getFontHeightInPoints()).append("pt;");
+            String alignment = switch (style.getAlignment()) {
+                case CENTER, CENTER_SELECTION -> "CENTER"; case RIGHT -> "CENTER-RIGHT"; case LEFT -> "CENTER-LEFT";
+                default -> cell.getCellType() == CellType.NUMERIC || cell.getCellType() == CellType.FORMULA ? "CENTER-RIGHT" : "CENTER-LEFT";
+            };
+            css.append("-fx-alignment:").append(alignment).append(';');
+            if (style.getBorderBottom() != BorderStyle.NONE || style.getBorderTop() != BorderStyle.NONE || style.getBorderLeft() != BorderStyle.NONE || style.getBorderRight() != BorderStyle.NONE)
+                css.append("-fx-border-color:#64748b;-fx-border-width:1;");
+            return css.toString();
+    }
+    private void smokeLayout() { stage.getScene().getRoot().applyCss(); stage.getScene().getRoot().layout(); grid.layout(); paintMerges(); }
     private GridCell smokeCell(int row, int column) {
         return grid.lookupAll(".table-cell").stream().filter(n -> n instanceof GridCell)
                 .map(n -> (GridCell) n).filter(c -> c.getTableRow().getItem() != null && c.getTableRow().getItem() == row && c.column == column)
@@ -840,6 +968,34 @@ public final class SpreadsheetApp extends Application {
         javax.imageio.ImageIO.write(rendered, "png", path.toFile());
     }
     @SuppressWarnings("unchecked")
+    private void smokeMergedCells() throws IOException {
+        address.setText("A1"); goTo(); smokeLayout();
+        book.transaction(b -> { b.set(0, 9, 0, "Merged title"); b.style(0, 9, 0, "bold", "true"); });
+        grid.refresh(); smokeLayout();
+        grid.getSelectionModel().clearSelection();
+        grid.getSelectionModel().selectRange(9, grid.getColumns().get(1), 10, grid.getColumns().get(2));
+        actions.get("mergeCells").run(); smokeLayout();
+        if (mergeLayer.getChildren().size() != 1) throw new IllegalStateException("Merge overlay missing");
+        var label = (Label) mergeLayer.getChildren().getFirst();
+        if (!label.getText().equals("Merged title") || label.getWidth() < smokeCell(9, 0).getWidth() * 1.9
+                || label.getHeight() < smokeCell(9, 0).getHeight() * 1.9) throw new IllegalStateException("Merge span incorrect");
+        screenshot(Path.of("build/merged-cell-smoke.png"));
+        grid.scrollTo(50); smokeLayout();
+        if (!mergeLayer.getChildren().isEmpty()) throw new IllegalStateException("Offscreen merge remained visible");
+        grid.scrollTo(9); smokeLayout();
+        if (mergeLayer.getChildren().isEmpty()) throw new IllegalStateException("Scrolled merge did not return");
+        grid.getSelectionModel().clearAndSelect(10, grid.getColumns().get(2));
+        grid.getFocusModel().focus(10, grid.getColumns().get(2));
+        grid.fireEvent(new KeyEvent(KeyEvent.KEY_TYPED, "병합", "", KeyCode.UNDEFINED, false, false, false, false));
+        if (pendingEdit == null || !pendingEdit.getAsBoolean()) throw new IllegalStateException("Merged typing failed");
+        if (!book.raw(0, 9, 0).equals("병합") || !book.raw(0, 10, 1).isEmpty()) throw new IllegalStateException("Merged edit missed anchor");
+        undo(); smokeLayout();
+        grid.getSelectionModel().clearAndSelect(10, grid.getColumns().get(2));
+        actions.get("unmergeCells").run(); smokeLayout();
+        if (!mergeLayer.getChildren().isEmpty() || book.workbook().getSheetAt(0).getNumMergedRegions() != 0)
+            throw new IllegalStateException("Unmerge failed");
+        undo(); undo(); undo(); address.setText("A1"); goTo(); smokeLayout();
+    }
     private void smokeSaveAndGit() throws Exception {
         var folder = Files.createTempDirectory(Path.of("build"), "ui-smoke-").toAbsolutePath();
         if (GitService.run(folder, "init", "-b", "main").code() != 0) throw new IllegalStateException("Smoke repository initialization failed");
@@ -877,33 +1033,22 @@ public final class SpreadsheetApp extends Application {
         private TextArea editor;
         GridCell(int column) { this.column = column; }
         @Override protected void updateItem(String value, boolean empty) {
-            super.updateItem(value, empty);
+            super.updateItem(value, empty); requestMergePaint();
             setWrapText(false);
             if (empty) { setText(null); setGraphic(null); setStyle(""); return; }
             if (!isEditing()) { setText(value); setGraphic(null); }
             int row = getTableRow().getItem() == null ? -1 : getTableRow().getItem();
             var cell = row < 0 ? null : book.cell(sheetIndex, row, column, false);
             if (cell == null) { setStyle(""); return; }
-            var style = cell.getCellStyle(); var font = book.workbook().getFontAt(style.getFontIndex());
-            setWrapText(style.getWrapText());
-            var css = new StringBuilder("-fx-font-weight:").append(font.getBold() ? "bold" : "normal").append(";-fx-font-style:").append(font.getItalic() ? "italic" : "normal").append(';');
-            if (style instanceof org.apache.poi.xssf.usermodel.XSSFCellStyle xs && style.getFillPattern() == FillPatternType.SOLID_FOREGROUND && !isSelected()) {
-                var color = xs.getFillForegroundXSSFColor(); var rgb = color == null ? null : color.getRGB();
-                if (rgb != null) css.append("-fx-background-color:#").append(HexFormat.of().formatHex(rgb)).append(';');
-            }
-            css.append("-fx-font-size:").append(font.getFontHeightInPoints()).append("pt;");
-            String alignment = switch (style.getAlignment()) {
-                case CENTER, CENTER_SELECTION -> "CENTER"; case RIGHT -> "CENTER-RIGHT"; case LEFT -> "CENTER-LEFT";
-                default -> cell.getCellType() == CellType.NUMERIC || cell.getCellType() == CellType.FORMULA ? "CENTER-RIGHT" : "CENTER-LEFT";
-            };
-            css.append("-fx-alignment:").append(alignment).append(';');
-            if (style.getBorderBottom() != BorderStyle.NONE || style.getBorderTop() != BorderStyle.NONE || style.getBorderLeft() != BorderStyle.NONE || style.getBorderRight() != BorderStyle.NONE)
-                css.append("-fx-border-color:#64748b;-fx-border-width:1;");
-            setStyle(css.toString());
+            setWrapText(cell.getCellStyle().getWrapText());
+            setStyle(cellCss(cell, isSelected()));
         }
         @Override public void startEdit() {
             if (isEmpty()) return;
-            super.startEdit(); int row = getTableRow().getItem();
+            int row = getTableRow().getItem();
+            var anchor = mergeAnchor(row, column);
+            if (anchor.row() != row || anchor.column() != column) { focusMergeAnchor(anchor, true); return; }
+            super.startEdit();
             editor = new TextArea(book.input(sheetIndex, row, column)); editor.setWrapText(true); editor.setPrefRowCount(2);
             pendingEdit = () -> finish(row);
             editor.addEventFilter(KeyEvent.KEY_PRESSED, event -> {
