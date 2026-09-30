@@ -28,6 +28,8 @@ public final class SpreadsheetApp extends Application {
     private static final DataFormat CELL_COPY = new DataFormat("application/x-git-sheet-copy-id");
     private CellClipboard cellClipboard;
     private String copyId;
+    private record CutRange(int sheet, int row, int column, int rows, int columns) {}
+    private CutRange pendingCut;
     private Stage stage;
     private Path document;
     private boolean dirty;
@@ -92,7 +94,7 @@ public final class SpreadsheetApp extends Application {
                 item("저장", () -> save(false)), item("다른 이름으로 저장", () -> save(true)), new SeparatorMenuItem(),
                 item("Excel 내보내기 (.xlsx)", () -> export(false)), item("현재 시트 CSV 내보내기", () -> export(true)));
         var edit = new Menu("편집"); edit.getItems().addAll(item("실행 취소  Ctrl+Z", this::undo), item("다시 실행  Ctrl+Y", this::redo),
-                item("복사  Ctrl+C", this::copy), item("붙여넣기  Ctrl+V", this::paste),
+                item("복사  Ctrl+C", this::copy), item("잘라내기  Ctrl+X", () -> copy(true)), item("붙여넣기  Ctrl+V", this::paste),
                 item("값만 붙여넣기", () -> paste(CellClipboard.Mode.VALUES)), item("서식만 붙여넣기", () -> paste(CellClipboard.Mode.FORMATS)),
                 item("내용 지우기", this::clear), item("찾기", this::find), item("찾기 및 바꾸기", this::replaceAll),
                 new SeparatorMenuItem(), item("아래로 채우기  Ctrl+D", () -> fill(SheetEdits.Direction.DOWN)), item("오른쪽 채우기  Ctrl+R", () -> fill(SheetEdits.Direction.RIGHT)));
@@ -205,11 +207,11 @@ public final class SpreadsheetApp extends Application {
         selectionInfo.setText("선택 %d셀 · 숫자 %d · 합계 %s".formatted(values.size(), count, Double.toString(sum)));
     }
     private boolean mutate(Runnable action) {
-        try { book.transaction(_ -> action.run()); dirty = true; grid.refresh(); title(); selectionChanged(); return true; }
+        try { book.transaction(_ -> action.run()); pendingCut = null; dirty = true; grid.refresh(); title(); selectionChanged(); return true; }
         catch (Exception e) { error(e); grid.refresh(); return false; }
     }
-    private void undo() { if (book.undo()) { dirty = true; refreshTabs(); refresh(); } }
-    private void redo() { if (book.redo()) { dirty = true; refreshTabs(); refresh(); } }
+    private void undo() { if (book.undo()) { pendingCut = null; dirty = true; refreshTabs(); refresh(); } }
+    private void redo() { if (book.redo()) { pendingCut = null; dirty = true; refreshTabs(); refresh(); } }
     private void applyStyle(String property, String value) {
         var positions = selectedPositions(); if (positions.isEmpty()) return;
         mutate(() -> positions.forEach(p -> book.style(sheetIndex, p.row(), p.column(), property, value)));
@@ -224,10 +226,12 @@ public final class SpreadsheetApp extends Application {
         if (event.getTarget() instanceof TextInputControl) return;
         if (event.isShortcutDown()) {
             if (event.getCode() == KeyCode.C) { copy(); event.consume(); }
+            else if (event.getCode() == KeyCode.X) { copy(true); event.consume(); }
             else if (event.getCode() == KeyCode.V) { paste(); event.consume(); }
             else if (event.getCode() == KeyCode.D) { fill(SheetEdits.Direction.DOWN); event.consume(); }
             else if (event.getCode() == KeyCode.R) { fill(SheetEdits.Direction.RIGHT); event.consume(); }
-        } else if (event.getCode() == KeyCode.DELETE || event.getCode() == KeyCode.BACK_SPACE) { clear(); event.consume(); }
+        } else if (event.getCode() == KeyCode.ESCAPE && pendingCut != null) { pendingCut = null; status.setText("잘라내기를 취소했습니다. 복사한 내용은 유지됩니다."); event.consume(); }
+        else if (event.getCode() == KeyCode.DELETE || event.getCode() == KeyCode.BACK_SPACE) { clear(); event.consume(); }
         else if (event.getCode() == KeyCode.F2 || event.getCode() == KeyCode.ENTER) {
             var focus = grid.getFocusModel().getFocusedCell(); grid.edit(focus.getRow(), focus.getTableColumn()); event.consume();
         }
@@ -238,10 +242,14 @@ public final class SpreadsheetApp extends Application {
         return new Bounds(cells.stream().mapToInt(TablePosition::getRow).min().orElse(0), cells.stream().mapToInt(TablePosition::getRow).max().orElse(0),
                 cells.stream().mapToInt(TablePosition::getColumn).min().orElse(1), cells.stream().mapToInt(TablePosition::getColumn).max().orElse(1));
     }
-    private void copy() {
+    private void copy() { copy(false); }
+    private void copy(boolean cut) {
         if (pendingEdit != null && !pendingEdit.getAsBoolean()) return;
         var b = bounds(); if (b == null) return;
         if (!clipboardViewIsContiguous(b)) return;
+        if (cut && selectedPositions().size() != (b.lastRow() - b.firstRow() + 1) * (b.lastCol() - b.firstCol() + 1)) {
+            status.setText("잘라내기는 빈틈 없이 선택한 직사각형 범위에 사용할 수 있습니다."); return;
+        }
         var text = new StringBuilder();
         for (int r = b.firstRow(); r <= b.lastRow(); r++) {
             if (r > b.firstRow()) text.append('\n');
@@ -256,10 +264,18 @@ public final class SpreadsheetApp extends Application {
                     (Integer) grid.getColumns().get(b.firstCol()).getUserData(), b.lastRow() - b.firstRow() + 1, b.lastCol() - b.firstCol() + 1);
             String id = UUID.randomUUID().toString();
             var content = new ClipboardContent(); content.putString(text.toString()); content.put(CELL_COPY, id);
-            if (Clipboard.getSystemClipboard().setContent(content)) { cellClipboard = snapshot; copyId = id; }
+            if (Clipboard.getSystemClipboard().setContent(content)) {
+                cellClipboard = snapshot; copyId = id;
+                pendingCut = cut ? new CutRange(sheetIndex, grid.getItems().get(b.firstRow()), (Integer) grid.getColumns().get(b.firstCol()).getUserData(), b.lastRow() - b.firstRow() + 1, b.lastCol() - b.firstCol() + 1) : null;
+                if (cut) status.setText("잘라내기 대기 · 같은 시트에서 Ctrl+V로 이동 · Esc 또는 문서 편집으로 취소");
+            }
         } catch (Exception e) { error(e); }
     }
     private boolean clipboardViewIsContiguous(Bounds b) {
+        int firstColumn = (Integer) grid.getColumns().get(b.firstCol()).getUserData();
+        for (int c = b.firstCol(); c <= b.lastCol(); c++) if ((Integer) grid.getColumns().get(c).getUserData() != firstColumn + c - b.firstCol()) {
+            status.setText("열 순서를 원래대로 되돌린 뒤 복사·붙여넣기를 사용하세요."); return false;
+        }
         int first = grid.getItems().get(b.firstRow());
         for (int r = b.firstRow(); r <= b.lastRow(); r++) if (grid.getItems().get(r) != first + r - b.firstRow()) {
             status.setText("복사·붙여넣기를 사용하려면 정렬·필터를 해제하고 연속 범위를 선택하세요."); return false;
@@ -277,6 +293,13 @@ public final class SpreadsheetApp extends Application {
             status.setText("붙여넣기를 사용하려면 정렬·필터를 먼저 해제하세요."); return;
         }
         if (cellClipboard != null && copyId != null && copyId.equals(Clipboard.getSystemClipboard().getContent(CELL_COPY))) {
+            if (pendingCut != null) {
+                if (mode != CellClipboard.Mode.ALL) { status.setText("잘라내기는 일반 붙여넣기(Ctrl+V)를 사용하세요."); return; }
+                var cut = pendingCut;
+                if (cut.sheet() != sheetIndex) { status.setText("시트 사이의 잘라내기는 아직 지원하지 않습니다. 같은 시트에 붙여넣거나 복사를 사용하세요."); return; }
+                pasteCut(cut, grid.getItems().get(b.firstRow()), (Integer) grid.getColumns().get(b.firstCol()).getUserData());
+                return;
+            }
             mutate(() -> cellClipboard.paste(book, sheetIndex, grid.getItems().get(b.firstRow()),
                     (Integer) grid.getColumns().get(b.firstCol()).getUserData(), mode)); return;
         }
@@ -291,6 +314,11 @@ public final class SpreadsheetApp extends Application {
                 book.set(sheetIndex, grid.getItems().get(start + r), firstCol + c,
                         mode == CellClipboard.Mode.VALUES ? "'" + rows.get(r).get(c) : rows.get(r).get(c)); });
         } catch (Exception e) { error(e); }
+    }
+    private void pasteCut(CutRange cut, int row, int column) {
+        if (mutate(() -> CellMove.move(book, cut.sheet(), cut.row(), cut.column(), cut.rows(), cut.columns(), row, column))) {
+            cellClipboard = null; copyId = null; status.setText("셀 이동 완료 · 참조 갱신 · Ctrl+Z로 실행 취소");
+        }
     }
     private void clear() { var positions = selectedPositions(); if (!positions.isEmpty()) mutate(() -> positions.forEach(p -> book.set(sheetIndex, p.row(), p.column(), ""))); }
     private void goTo() {
@@ -436,6 +464,7 @@ public final class SpreadsheetApp extends Application {
         return answer == ButtonType.YES ? save(false) : answer == ButtonType.NO;
     }
     private void replace(Book next) {
+        pendingCut = null;
         cellClipboard = null; copyId = null;
         try { book.close(); } catch (IOException ignored) { }
         book = next;
@@ -520,6 +549,10 @@ public final class SpreadsheetApp extends Application {
         if (rowWindow != 2000 || !Objects.equals(selected(), new Position(2000, 51))) throw new IllegalStateException("Navigation failed");
         address.setText("A1"); goTo(); grid.applyCss(); grid.layout();
         String original = book.raw(0, 0, 0);
+        pendingCut = new CutRange(0, 0, 0, 1, 1);
+        pasteCut(pendingCut, 15, 0);
+        if (pendingCut != null || !book.raw(0, 0, 0).isEmpty() || !book.raw(0, 15, 0).equals(original)) throw new IllegalStateException("Cut paste failed");
+        undo(); address.setText("A1"); goTo();
         structuralEdit(StructuralEdits.Axis.ROW, true);
         if (!book.raw(0, 1, 0).equals(original) || !book.raw(0, 0, 0).isEmpty()) throw new IllegalStateException("Insert row failed");
         undo(); address.setText("A1"); goTo();
