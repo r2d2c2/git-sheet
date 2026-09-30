@@ -5,6 +5,39 @@ import org.apache.poi.ss.usermodel.*;
 import static org.junit.jupiter.api.Assertions.*;
 
 class SheetEditsTest {
+    @Test void fillRejectsMergedSourceOrDestinationBeforeWriting() throws Exception {
+        try (var book = new Book()) {
+            book.set(0, 0, 0, "source"); book.set(0, 1, 0, "keep");
+            var sheet = book.workbook().getSheetAt(0);
+            sheet.addMergedRegion(new org.apache.poi.ss.util.CellRangeAddress(2, 2, 0, 1));
+            assertThrows(IllegalArgumentException.class, () -> SheetEdits.fill(book, 0, 0, 2, 0, 0, SheetEdits.Direction.DOWN));
+            assertEquals("keep", book.raw(0, 1, 0));
+            assertThrows(IllegalArgumentException.class, () -> SheetEdits.fill(book, 0, 2, 3, 1, 1, SheetEdits.Direction.DOWN));
+            assertEquals(1, sheet.getNumMergedRegions());
+            SheetEdits.fill(book, 0, 0, 1, 0, 0, SheetEdits.Direction.DOWN);
+            assertEquals("source", book.raw(0, 1, 0));
+        }
+    }
+    @Test void fillRejectsArraySourceAndDestinationBeforeWriting() throws Exception {
+        try (var book = new Book()) {
+            book.set(0, 0, 0, "5"); book.set(0, 1, 0, "99");
+            var sheet = book.workbook().getSheetAt(0);
+            sheet.setArrayFormula("ROW(A3:A4)", new org.apache.poi.ss.util.CellRangeAddress(2, 3, 0, 0));
+            assertThrows(IllegalArgumentException.class, () -> SheetEdits.fill(book, 0, 0, 3, 0, 0, SheetEdits.Direction.DOWN));
+            assertEquals("99", book.raw(0, 1, 0));
+            assertThrows(IllegalArgumentException.class, () -> SheetEdits.fill(book, 0, 2, 2, 0, 1, SheetEdits.Direction.RIGHT));
+            assertNull(book.cell(0, 2, 1, false));
+            assertTrue(book.cell(0, 2, 0, false).isPartOfArrayFormulaGroup());
+        }
+    }
+    @Test void fillRejectsProtectedSheetWithoutMutation() throws Exception {
+        try (var book = new Book()) {
+            book.set(0, 0, 0, "5"); book.set(0, 1, 0, "99");
+            book.workbook().getSheetAt(0).protectSheet("test");
+            assertThrows(IllegalArgumentException.class, () -> SheetEdits.fill(book, 0, 0, 1, 0, 0, SheetEdits.Direction.DOWN));
+            assertEquals("99", book.raw(0, 1, 0));
+        }
+    }
     @Test void fillDownMovesRelativeReferencesAndPreservesAbsoluteReferences() throws Exception {
         try (var book = new Book()) {
             book.set(0, 0, 0, "10"); book.set(0, 1, 0, "20"); book.set(0, 2, 0, "30");

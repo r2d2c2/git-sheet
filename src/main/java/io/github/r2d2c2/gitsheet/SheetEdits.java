@@ -13,6 +13,20 @@ public final class SheetEdits {
     public static void fill(Book book, int sheet, int top, int bottom, int left, int right, Direction direction) {
         if (top > bottom || left > right) throw new IllegalArgumentException("잘못된 선택 범위입니다.");
         book.cell(sheet, top, left, false); book.cell(sheet, bottom, right, false);
+        var targetSheet = book.workbook().getSheetAt(sheet);
+        if (targetSheet.getProtect()) throw new IllegalArgumentException("보호된 시트에서는 채울 수 없습니다.");
+        var range = new org.apache.poi.ss.util.CellRangeAddress(top, bottom, left, right);
+        for (var merged : targetSheet.getMergedRegions()) {
+            if (merged.intersects(range)) throw new IllegalArgumentException("병합 셀을 포함한 범위는 병합을 해제한 뒤 채워 주세요.");
+        }
+        // Validate the entire range before touching any destination, including array sources.
+        for (var row : targetSheet) {
+            if (row.getRowNum() < top || row.getRowNum() > bottom) continue;
+            for (var cell : row) {
+                if (cell.getColumnIndex() >= left && cell.getColumnIndex() <= right && cell.isPartOfArrayFormulaGroup())
+                    throw new IllegalArgumentException("배열 수식을 포함한 범위는 채우기를 지원하지 않습니다.");
+            }
+        }
         for (int r = top; r <= bottom; r++) for (int c = left; c <= right; c++) {
             int sourceRow = direction == Direction.DOWN ? top : r;
             int sourceColumn = direction == Direction.RIGHT ? left : c;
