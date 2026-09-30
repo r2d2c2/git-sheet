@@ -1,5 +1,7 @@
 package io.github.r2d2c2.gitsheet;
 
+import javafx.fxml.FXML;
+import javafx.fxml.FXMLLoader;
 import javafx.application.Application;
 import javafx.application.Platform;
 import javafx.beans.property.ReadOnlyStringWrapper;
@@ -38,11 +40,12 @@ public final class SpreadsheetApp extends Application {
     private boolean dirty;
     private int sheetIndex, rowWindow, columnWindow;
     private static final int ROW_WINDOW = 1000, COLUMN_WINDOW = 52;
-    private final TableView<Integer> grid = new TableView<>();
-    private final TabPane tabs = new TabPane();
-    private final TextField address = new TextField("A1"), filter = new TextField();
-    private final TextArea formula = new TextArea();
-    private final Label status = new Label("준비"), selectionInfo = new Label();
+    @FXML private TableView<Integer> grid;
+    @FXML private TabPane tabs;
+    @FXML private TextField address, filter;
+    @FXML private TextArea formula;
+    @FXML private Label status, selectionInfo;
+    @FXML private ComboBox<String> formats;
     private final ExecutorService background = Executors.newVirtualThreadPerTaskExecutor();
     private boolean changingTabs;
     private SaveNotification saveNotification;
@@ -54,10 +57,12 @@ public final class SpreadsheetApp extends Application {
     private record Bounds(int firstRow, int lastRow, int firstCol, int lastCol) {}
 
     public static void main(String[] args) { launch(args); }
-    @Override public void start(Stage stage) {
+    @Override public void start(Stage stage) throws IOException {
         this.stage = stage;
-        var root = new BorderPane();
-        root.setTop(new VBox(menu(), toolbar(), formulaBar()));
+        var loader = new FXMLLoader(Objects.requireNonNull(getClass().getResource("/spreadsheet.fxml")));
+        loader.setController(this);
+        BorderPane root = loader.load();
+        bindActions(); configureInputs();
         grid.setEditable(true); grid.setFixedCellSize(-1); grid.getSelectionModel().setCellSelectionEnabled(true);
         rowLayoutRefresh.setOnFinished(_ -> grid.refresh());
         grid.setRowFactory(_ -> new TableRow<>() {
@@ -70,16 +75,33 @@ public final class SpreadsheetApp extends Application {
         });
         grid.getSelectionModel().setSelectionMode(SelectionMode.MULTIPLE);
         grid.getSelectionModel().getSelectedCells().addListener((javafx.collections.ListChangeListener<TablePosition>) change -> selectionChanged());
-        grid.setOnKeyPressed(this::gridKey);
+        grid.addEventFilter(KeyEvent.KEY_PRESSED, this::gridKey);
+        grid.addEventFilter(KeyEvent.KEY_TYPED, this::typeIntoCell);
+        grid.setOnInputMethodTextChanged(event -> {
+            if (pendingEdit != null || event.getTarget() instanceof TextInputControl
+                    || (event.getCommitted().isEmpty() && event.getComposed().isEmpty())) return;
+            var editor = beginTyping();
+            if (editor != null) {
+                editor.fireEvent(new InputMethodEvent(InputMethodEvent.INPUT_METHOD_TEXT_CHANGED,
+                        event.getComposed(), event.getCommitted(), event.getCaretPosition()));
+                event.consume();
+            }
+        });
+        grid.setInputMethodRequests(new InputMethodRequests() {
+            @Override public javafx.geometry.Point2D getTextLocation(int offset) {
+                var point = grid.localToScreen(64, 30);
+                return point == null ? new javafx.geometry.Point2D(0, 0) : point;
+            }
+            @Override public int getLocationOffset(int x, int y) { return 0; }
+            @Override public void cancelLatestCommittedText() { }
+            @Override public String getSelectedText() { return ""; }
+        });
         grid.setPlaceholder(new Label("조건에 맞는 행이 없습니다."));
-        root.setCenter(grid);
         tabs.setTabClosingPolicy(TabPane.TabClosingPolicy.UNAVAILABLE); tabs.setPrefHeight(40);
         tabs.setStyle("-fx-open-tab-animation: none; -fx-close-tab-animation: none;");
         tabs.getSelectionModel().selectedIndexProperty().addListener((_, _, index) -> {
             if (!changingTabs && index.intValue() >= 0) { rangeFilter = null; sheetIndex = index.intValue(); rowWindow = columnWindow = 0; refresh(); }
         });
-        var foot = new HBox(20, status, selectionInfo); foot.setPadding(new Insets(8, 14, 8, 14));
-        root.setBottom(new VBox(tabs, foot));
         var overlay = new StackPane(root);
         saveNotification = new SaveNotification(overlay);
         var scene = new Scene(overlay, 1280, 820);
@@ -102,34 +124,54 @@ public final class SpreadsheetApp extends Application {
             });
         }
     }
-    private MenuBar menu() {
-        var file = new Menu("파일");
-        file.getItems().addAll(item("새 문서", this::newBook), item("열기 (.gsheet / .xlsx / .csv)", this::open),
-                item("저장", () -> save(false)), item("다른 이름으로 저장", () -> save(true)), new SeparatorMenuItem(),
-                item("Excel 내보내기 (.xlsx)", () -> export(false)), item("현재 시트 CSV 내보내기", () -> export(true)));
-        var edit = new Menu("편집"); edit.getItems().addAll(item("실행 취소  Ctrl+Z", this::undo), item("다시 실행  Ctrl+Y", this::redo),
-                item("복사  Ctrl+C", this::copy), item("잘라내기  Ctrl+X", () -> copy(true)), item("붙여넣기  Ctrl+V", this::paste),
-                item("값만 붙여넣기", () -> paste(CellClipboard.Mode.VALUES)), item("서식만 붙여넣기", () -> paste(CellClipboard.Mode.FORMATS)),
-                item("내용 지우기", this::clear), item("찾기", this::find), item("찾기 및 바꾸기", this::replaceAll),
-                new SeparatorMenuItem(), item("아래로 채우기  Ctrl+D", () -> fill(SheetEdits.Direction.DOWN)), item("오른쪽 채우기  Ctrl+R", () -> fill(SheetEdits.Direction.RIGHT)));
-        var format = new Menu("서식"); format.getItems().addAll(
-                item("왼쪽 정렬", () -> applyStyle("align", "LEFT")), item("가운데 정렬", () -> applyStyle("align", "CENTER")), item("오른쪽 정렬", () -> applyStyle("align", "RIGHT")),
-                item("모든 테두리", () -> applyStyle("border", "THIN")), item("테두리 없음", () -> applyStyle("border", "NONE")),
-                item("글꼴 크기", () -> prompt("글꼴 크기", "크기 (6–72)", "13").ifPresent(value -> {
+    private final Map<String, Runnable> actions = new HashMap<>();
+    private void bindActions() {
+        actions.put("newDocument", this::newBook);
+        actions.put("openDocument", this::open);
+        actions.put("saveDocument", () -> save(false));
+        actions.put("saveAs", () -> save(true));
+        actions.put("exportXlsx", () -> export(false));
+        actions.put("exportCsv", () -> export(true));
+        actions.put("undoEdit", this::undo);
+        actions.put("redoEdit", this::redo);
+        actions.put("copyCells", this::copy);
+        actions.put("cutCells", () -> copy(true));
+        actions.put("pasteCells", this::paste);
+        actions.put("pasteValues", () -> paste(CellClipboard.Mode.VALUES));
+        actions.put("pasteFormats", () -> paste(CellClipboard.Mode.FORMATS));
+        actions.put("clearCells", this::clear);
+        actions.put("findCells", this::find);
+        actions.put("replaceCells", this::replaceAll);
+        actions.put("fillDown", () -> fill(SheetEdits.Direction.DOWN));
+        actions.put("fillRight", () -> fill(SheetEdits.Direction.RIGHT));
+        actions.put("alignLeft", () -> applyStyle("align", "LEFT"));
+        actions.put("alignCenter", () -> applyStyle("align", "CENTER"));
+        actions.put("alignRight", () -> applyStyle("align", "RIGHT"));
+        actions.put("borderAll", () -> applyStyle("border", "THIN"));
+        actions.put("borderNone", () -> applyStyle("border", "NONE"));
+        actions.put("fontSize", () -> prompt("글꼴 크기", "크기 (6–72)", "13").ifPresent(value -> {
                     try { int size = Integer.parseInt(value); if (size < 6 || size > 72) throw new IllegalArgumentException("6–72 범위의 크기를 입력하세요."); applyStyle("size", value); }
                     catch (Exception e) { error(e); }
-                })), item("열 너비", this::columnWidth), item("행 높이…", this::rowHeight), item("행 높이 자동", () -> applyRowHeight(null)),
-                item("셀 줄바꿈 켜기", () -> applyStyle("wrap", "true")), item("셀 줄바꿈 끄기", () -> applyStyle("wrap", "false")));
-        var sheet = new Menu("시트"); sheet.getItems().addAll(item("시트 추가", this::addSheet), item("시트 이름 변경", this::renameSheet),
-                item("시트 삭제", this::deleteSheet), new SeparatorMenuItem(),
-                item("선택 행 위에 삽입", () -> structuralEdit(StructuralEdits.Axis.ROW, true)),
-                item("선택 행 전체 삭제", () -> structuralEdit(StructuralEdits.Axis.ROW, false)),
-                item("선택 열 왼쪽에 삽입", () -> structuralEdit(StructuralEdits.Axis.COLUMN, true)),
-                item("선택 열 전체 삭제", () -> structuralEdit(StructuralEdits.Axis.COLUMN, false)),
-                new SeparatorMenuItem(), item("이전 1,000행", () -> page(-1)), item("다음 1,000행", () -> page(1)));
-        var git = new Menu("Git"); git.getItems().addAll(item("서버 연결 / 동기화", this::gitConnect), item("문서 변경 내용 / 기록", this::gitInspect), item("문서 저장 후 커밋", this::gitCommit));
-        var help = new Menu("도움말"); help.getItems().add(item("사용법 및 호환성", () -> textDialog("Git Sheet 0.2", "JDK 25 + JavaFX\n\n"
-                + "더블 클릭 / F2: 셀 편집 · Enter: 적용 · Escape: 취소\n수식: =SUM(A1:A10), =IF(B1>0,\"예\",\"아니오\")\n"
+                }));
+        actions.put("columnWidth", this::columnWidth);
+        actions.put("rowHeight", this::rowHeight);
+        actions.put("autoRowHeight", () -> applyRowHeight(null));
+        actions.put("wrapOn", () -> applyStyle("wrap", "true"));
+        actions.put("wrapOff", () -> applyStyle("wrap", "false"));
+        actions.put("addSheet", this::addSheet);
+        actions.put("renameSheet", this::renameSheet);
+        actions.put("deleteSheet", this::deleteSheet);
+        actions.put("insertRows", () -> structuralEdit(StructuralEdits.Axis.ROW, true));
+        actions.put("deleteRows", () -> structuralEdit(StructuralEdits.Axis.ROW, false));
+        actions.put("insertColumns", () -> structuralEdit(StructuralEdits.Axis.COLUMN, true));
+        actions.put("deleteColumns", () -> structuralEdit(StructuralEdits.Axis.COLUMN, false));
+        actions.put("previousPage", () -> page(-1));
+        actions.put("nextPage", () -> page(1));
+        actions.put("gitConnect", this::gitConnect);
+        actions.put("gitInspect", this::gitInspect);
+        actions.put("gitCommit", this::gitCommit);
+        actions.put("help", () -> textDialog("Git Sheet 0.2", "JDK 25 + JavaFX\n\n"
+                + "한 번 클릭 후 타이핑: 새 값 입력 · 더블 클릭 / F2: 기존 값 편집 · Enter: 적용 · Escape: 취소\n수식: =SUM(A1:A10), =IF(B1>0,\"예\",\"아니오\")\n"
                 + "주소 상자: A1 또는 Z10000 입력 → 이동\n도구막대 정렬·필터는 현재 1,000행 화면에 적용됩니다. 데이터 메뉴에서 실제 범위 정렬을 사용할 수 있습니다.\n"
                 + "Ctrl+C/V: 탭으로 구분된 직사각형 데이터 복사·붙여넣기\nCtrl+D/R: 아래로/오른쪽 채우기 (상대 참조 이동)\nCtrl+S: Git 친화적인 .gsheet 저장 · 저장 위치 알림 4초\n"
                 + "Git → 서버 연결 / 동기화: GitHub·GitLab·Gitea·자체 서버 선택, push/fetch\n\n"
@@ -137,28 +179,28 @@ public final class SpreadsheetApp extends Application {
                 + "제한: Excel 완전 호환 제품이 아닙니다. VBA, Power Query, 피벗, 협업, 고급 차트 및 동적 배열 미지원.\n"
                 + ".gsheet 변환은 그림, 이름 정의, 유효성 검사, 조건부 서식 등 고급 Excel 요소를 보존하지 않습니다.\n"
                 + "병합·틀 고정 정보는 저장되지만 화면에는 반영되지 않습니다. 원본 .xlsx는 따로 보관하세요.\n"
-                + "외부 연결은 갱신하지 않으며 지원하지 않는 수식은 #UNSUPPORTED!로 표시됩니다.")));
-        var data = new Menu("데이터"); data.getItems().addAll(item("범위 데이터 정렬…", this::sortRange),
-                item("열별 필터…", this::filterRange), item("열별 필터 해제", () -> { rangeFilter = null; filterOffset = 0; refreshRows(); }));
-        return new MenuBar(file, edit, format, sheet, data, git, help);
+                + "외부 연결은 갱신하지 않으며 지원하지 않는 수식은 #UNSUPPORTED!로 표시됩니다."));
+        actions.put("sortRange", this::sortRange);
+        actions.put("filterRange", this::filterRange);
+        actions.put("clearFilter", () -> { rangeFilter = null; filterOffset = 0; refreshRows(); });
+        actions.put("new", this::newBook); actions.put("open", this::open); actions.put("save", () -> save(false));
+        actions.put("undo", this::undo); actions.put("redo", this::redo);
+        actions.put("bold", () -> toggleFont("bold")); actions.put("italic", () -> toggleFont("italic"));
+        actions.put("fill", () -> applyStyle("fill", Short.toString(IndexedColors.LIGHT_YELLOW.getIndex())));
+        actions.put("ascending", () -> sort(false)); actions.put("descending", () -> sort(true));
+        actions.put("chart", this::chart); actions.put("git", this::gitConnect);
     }
-    private ToolBar toolbar() {
-        var formats = new ComboBox<String>(FXCollections.observableArrayList("일반", "숫자", "통화", "백분율", "날짜"));
+    @FXML private void dispatchAction(javafx.event.ActionEvent event) {
+        Object source = event.getSource();
+        String key = (String) (source instanceof MenuItem item ? item.getUserData() : ((javafx.scene.Node) source).getUserData());
+        Objects.requireNonNull(actions.get(key), key).run();
+    }
+    private void configureInputs() {
+        formats.setItems(FXCollections.observableArrayList("일반", "숫자", "통화", "백분율", "날짜"));
         formats.setValue("일반"); formats.setOnAction(_ -> applyStyle("format", switch (formats.getValue()) {
             case "숫자" -> "#,##0.00"; case "통화" -> "₩#,##0"; case "백분율" -> "0.00%"; case "날짜" -> "yyyy-mm-dd"; default -> "General";
         }));
-        filter.setPromptText("현재 화면 행 필터"); filter.setPrefWidth(165); filter.setOnAction(_ -> refreshRows());
-        return new ToolBar(button("새 문서", this::newBook), button("열기", this::open), button("저장", () -> save(false)),
-                new Separator(), button("↶", this::undo), button("↷", this::redo), new Separator(),
-                button("굵게", () -> toggleFont("bold")), button("기울임", () -> toggleFont("italic")),
-                button("노란 배경", () -> applyStyle("fill", Short.toString(IndexedColors.LIGHT_YELLOW.getIndex()))), formats,
-                new Separator(), button("화면 A→Z", () -> sort(false)), button("화면 Z→A", () -> sort(true)), filter,
-                button("차트", this::chart), button("Git", this::gitConnect));
-    }
-    private HBox formulaBar() {
-        address.setPrefWidth(100); address.setMaxWidth(100); address.setOnAction(_ -> goTo());
-        formula.setPromptText("값 또는 =수식을 입력하세요"); HBox.setHgrow(formula, Priority.ALWAYS);
-        formula.setPrefRowCount(2); formula.setWrapText(true);
+        filter.setOnAction(_ -> refreshRows()); address.setOnAction(_ -> goTo());
         formula.addEventFilter(KeyEvent.KEY_PRESSED, event -> {
             if (event.getCode() == KeyCode.ENTER) {
                 if (event.isAltDown()) formula.replaceSelection("\n");
@@ -166,10 +208,8 @@ public final class SpreadsheetApp extends Application {
                 event.consume();
             } else if (event.getCode() == KeyCode.ESCAPE) { selectionChanged(); event.consume(); }
         });
-        var bar = new HBox(10, address, new Label("fx"), formula); bar.setPadding(new Insets(9, 12, 9, 12)); return bar;
     }
     private static Button button(String text, Runnable action) { var b = new Button(text); b.setOnAction(_ -> action.run()); return b; }
-    private static MenuItem item(String text, Runnable action) { var m = new MenuItem(text); m.setOnAction(_ -> action.run()); return m; }
     private void refreshTabs() {
         changingTabs = true; tabs.getTabs().clear();
         for (var sheet : book.workbook()) tabs.getTabs().add(new Tab(sheet.getSheetName()));
@@ -261,6 +301,26 @@ public final class SpreadsheetApp extends Application {
         var cell = book.cell(sheetIndex, p.row(), p.column(), false);
         var font = book.workbook().getFontAt(cell == null ? 0 : cell.getCellStyle().getFontIndex());
         applyStyle(property, Boolean.toString(!(property.equals("bold") ? font.getBold() : font.getItalic())));
+    }
+    private void typeIntoCell(KeyEvent event) {
+        if (event.getTarget() instanceof TextInputControl || pendingEdit != null || event.isShortcutDown()
+                || event.isAltDown() || event.getCharacter().isEmpty()
+                || event.getCharacter().codePoints().anyMatch(Character::isISOControl)) return;
+        var editor = beginTyping();
+        if (editor != null) {
+            editor.setText(event.getCharacter()); editor.positionCaret(editor.getLength()); event.consume();
+        }
+    }
+    private TextArea beginTyping() {
+        var focus = grid.getFocusModel().getFocusedCell();
+        if (focus.getRow() < 0 || focus.getColumn() <= 0) return null;
+        grid.edit(focus.getRow(), focus.getTableColumn());
+        for (var node : grid.lookupAll(".table-cell")) {
+            if (node instanceof GridCell cell && cell.isEditing()) {
+                cell.editor.clear(); cell.editor.applyCss(); return cell.editor;
+            }
+        }
+        return null;
     }
     private void gridKey(KeyEvent event) {
         if (event.getTarget() instanceof TextInputControl) return;
@@ -658,13 +718,30 @@ public final class SpreadsheetApp extends Application {
     /** Integration smoke exercises actual table edit controls, history, filter and navigation. */
     private void smokeTest() {
         grid.getSelectionModel().clearAndSelect(1, grid.getColumns().get(2));
-        grid.edit(1, grid.getColumns().get(2)); grid.applyCss(); grid.layout();
+        grid.getFocusModel().focus(1, grid.getColumns().get(2)); grid.requestFocus();
+        grid.fireEvent(new KeyEvent(KeyEvent.KEY_TYPED, "5", "", KeyCode.UNDEFINED, false, false, false, false));
+        grid.applyCss(); grid.layout();
         var editor = grid.lookupAll(".text-area").stream().filter(n -> n instanceof TextArea && n.isVisible()).map(n -> (TextArea)n).findFirst().orElseThrow();
-        editor.setText("5"); editor.fireEvent(new KeyEvent(KeyEvent.KEY_PRESSED, "", "", KeyCode.ENTER, false, false, false, false));
+        if (!editor.getText().equals("5")) throw new IllegalStateException("Type-to-replace failed");
+        editor.fireEvent(new KeyEvent(KeyEvent.KEY_PRESSED, "", "", KeyCode.ENTER, false, false, false, false));
         if (!book.raw(0, 1, 1).equals("5") || !book.display(0, 1, 3).equals("₩600,000")) throw new IllegalStateException("Edit/recalculation failed");
         undo(); if (!book.raw(0, 1, 1).equals("3")) throw new IllegalStateException("Undo failed");
         redo(); if (!book.raw(0, 1, 1).equals("5")) throw new IllegalStateException("Redo failed");
-        undo();
+        undo(); smokeLayout();
+        grid.getSelectionModel().clearAndSelect(1, grid.getColumns().get(2));
+        grid.getFocusModel().focus(1, grid.getColumns().get(2));
+        grid.fireEvent(new KeyEvent(KeyEvent.KEY_TYPED, "9", "", KeyCode.UNDEFINED, false, false, false, false));
+        var typedEditor = (TextArea) smokeCell(1, 1).getGraphic();
+        typedEditor.fireEvent(new KeyEvent(KeyEvent.KEY_PRESSED, "", "", KeyCode.ESCAPE, false, false, false, false));
+        if (!book.raw(0, 1, 1).equals("3")) throw new IllegalStateException("Type/Escape changed value");
+        grid.fireEvent(new KeyEvent(KeyEvent.KEY_PRESSED, "", "", KeyCode.F2, false, false, false, false));
+        typedEditor = (TextArea) smokeCell(1, 1).getGraphic();
+        if (!typedEditor.getText().equals("3")) throw new IllegalStateException("F2 lost existing value");
+        typedEditor.fireEvent(new KeyEvent(KeyEvent.KEY_PRESSED, "", "", KeyCode.ESCAPE, false, false, false, false));
+        grid.fireEvent(new InputMethodEvent(InputMethodEvent.INPUT_METHOD_TEXT_CHANGED, List.of(), "한글", 0));
+        typedEditor = (TextArea) smokeCell(1, 1).getGraphic();
+        if (!typedEditor.getText().equals("한글")) throw new IllegalStateException("IME committed text lost");
+        typedEditor.fireEvent(new KeyEvent(KeyEvent.KEY_PRESSED, "", "", KeyCode.ESCAPE, false, false, false, false));
         // Avoid changing the user's system clipboard during smoke checks.
         filter.setText("마우스"); refreshRows();
         if (grid.getItems().size() != 1 || grid.getItems().getFirst() != 2) throw new IllegalStateException("Filter failed");
@@ -764,7 +841,7 @@ public final class SpreadsheetApp extends Application {
     }
     @SuppressWarnings("unchecked")
     private void smokeSaveAndGit() throws Exception {
-        var folder = Files.createTempDirectory(Path.of("target"), "ui-smoke-").toAbsolutePath();
+        var folder = Files.createTempDirectory(Path.of("build"), "ui-smoke-").toAbsolutePath();
         if (GitService.run(folder, "init", "-b", "main").code() != 0) throw new IllegalStateException("Smoke repository initialization failed");
         document = folder.resolve("저장 알림.gsheet");
         if (!save(false) || !saveNotification.isVisible() || !saveNotification.displayedPath().equals(document.toString())) throw new IllegalStateException("Save notification did not display the actual path");

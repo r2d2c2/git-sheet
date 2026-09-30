@@ -1,13 +1,10 @@
 <component name="ProjectRunConfigurationManager">
-  <configuration default="false" name="Git Sheet" type="MavenRunConfiguration" factoryName="Maven">
-    <MavenSettings>
-      <option name="myRunnerParameters">
-        <MavenRunnerParameters>
-          <option name="workingDirPath" value="$PROJECT_DIR$" />
-          <option name="goals"><list><option value="javafx:run" /></list></option>
-        </MavenRunnerParameters>
-      </option>
-    </MavenSettings>
+  <configuration default="false" name="Git Sheet" type="GradleRunConfiguration" factoryName="Gradle">
+    <ExternalSystemSettings>
+      <option name="externalProjectPath" value="$PROJECT_DIR$" />
+      <option name="externalSystemIdString" value="GRADLE" />
+      <option name="taskNames"><list><option value="run" /></list></option>
+    </ExternalSystemSettings>
     <method v="2" />
   </configuration>
 </component>

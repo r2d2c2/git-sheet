@@ -1,0 +1,40 @@
+plugins { id 'application' }
+group = 'io.github.r2d2c2'
+version = '0.2.0-SNAPSHOT'
+
+repositories { mavenCentral() }
+java { toolchain { languageVersion = JavaLanguageVersion.of(25) } }
+
+def os = System.getProperty('os.name').toLowerCase(Locale.ROOT)
+def arm = System.getProperty('os.arch') in ['aarch64', 'arm64']
+def fxPlatform = os.contains('win') ? 'win' : os.contains('mac') ? (arm ? 'mac-aarch64' : 'mac') : (arm ? 'linux-aarch64' : 'linux')
+dependencies {
+    implementation platform('org.apache.logging.log4j:log4j-bom:2.26.1')
+    ['base', 'graphics', 'controls', 'fxml'].each {
+        implementation "org.openjfx:javafx-${it}:25.0.4:${fxPlatform}"
+    }
+    implementation 'org.apache.poi:poi-ooxml:5.5.1'
+    implementation 'com.google.code.gson:gson:2.13.2'
+    implementation 'org.apache.commons:commons-csv:1.14.1'
+    runtimeOnly 'org.apache.logging.log4j:log4j-to-jul'
+    testImplementation platform('org.junit:junit-bom:6.0.3')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+application {
+    mainClass = 'io.github.r2d2c2.gitsheet.Launcher'
+    applicationDefaultJvmArgs = ['--enable-native-access=ALL-UNNAMED']
+}
+tasks.withType(JavaCompile).configureEach { options.encoding = 'UTF-8' }
+test {
+    useJUnitPlatform()
+    jvmArgs '--enable-native-access=ALL-UNNAMED'
+}
+tasks.register('smokeTest', JavaExec) {
+    group = 'verification'
+    description = 'Run the actual JavaFX UI smoke test (requires a display).'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = application.mainClass
+    jvmArgs '--enable-native-access=ALL-UNNAMED'
+    args '--smoke-test'
+}

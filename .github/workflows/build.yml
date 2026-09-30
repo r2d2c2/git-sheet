@@ -17,18 +17,18 @@ jobs:
         with:
           distribution: temurin
           java-version: '25'
-          cache: maven
+          cache: gradle
       - name: Test (Windows)
         if: runner.os == 'Windows'
-        run: .\mvnw.cmd -B -ntp clean verify
+        run: .\gradlew.bat --no-daemon clean build
       - name: Test (Linux)
         if: runner.os == 'Linux'
-        run: sh mvnw -B -ntp clean verify
+        run: sh gradlew --no-daemon clean build
       - name: JavaFX smoke (Linux)
         if: runner.os == 'Linux'
-        run: xvfb-run -a sh mvnw -B -ntp javafx:run '-Djavafx.args=--smoke-test'
+        run: xvfb-run -a sh gradlew --no-daemon smokeTest
       - uses: actions/upload-artifact@v7.0.1
         if: always()
         with:
           name: test-reports-${{ matrix.os }}
-          path: target/surefire-reports/
+          path: build/test-results/test/

@@ -8,30 +8,30 @@ JDK 25와 JavaFX로 만든 **Git 친화적인 데스크톱 스프레드시트**�
 
 ## 빠른 시작
 
-필수: **JDK 25**, Git. Maven은 Wrapper가 내려받습니다. 첫 실행에는 인터넷이 필요합니다.
+필수: **JDK 25**, Git. Gradle 9.4.1은 Wrapper가 내려받습니다. 첫 실행에는 인터넷이 필요합니다.
 
 Windows PowerShell:
 
 ```powershell
-.\mvnw.cmd clean verify
-.\mvnw.cmd javafx:run
+.\gradlew.bat clean build
+.\gradlew.bat run
 ```
 
 macOS / Linux:
 
 ```sh
-./mvnw clean verify
-./mvnw javafx:run
+./gradlew clean build
+./gradlew run
 ```
 
-Windows에서 `run.cmd`를 실행해도 됩니다. `JAVA_HOME`은 JDK 25 설치 폴더를 가리켜야 합니다. Maven 3.9의 Guice가 JDK 25에서 출력하는 `sun.misc.Unsafe` 경고는 앱 코드에서 발생하는 경고가 아닙니다.
+Windows에서 `run.cmd`를 실행해도 됩니다. `JAVA_HOME`은 JDK 25 설치 폴더를 가리켜야 합니다.
 
 ### IntelliJ IDEA
 
-1. 이 폴더의 `pom.xml`을 **프로젝트로 열기**합니다.
-2. Project SDK와 Maven Runner JRE를 **JDK 25**로 설정합니다.
-3. Maven 프로젝트를 동기화합니다.
-4. Maven 도구 창 → Plugins → javafx → `javafx:run`을 실행합니다. 공유 실행 설정 `Git Sheet`도 포함되어 있습니다.
+1. 이 폴더의 `build.gradle`을 **프로젝트로 열기**합니다.
+2. Project SDK와 Gradle JVM를 **JDK 25**로 설정합니다.
+3. Gradle 프로젝트를 동기화합니다.
+4. Gradle 도구 창 → Tasks → application → `run`을 실행합니다. 공유 실행 설정 `Git Sheet`도 포함되어 있습니다.
 
 ## 구현된 기능
 
@@ -129,17 +129,23 @@ git config --global user.email "you@example.com"
 - Gson 2.13.2 / Commons CSV 1.14.1: 텍스트 저장과 CSV 파싱.
 - 문서 저장은 같은 디렉터리 임시 파일을 사용하고 가능한 파일시스템에서는 원자적으로 교체합니다.
 - Git I/O는 가상 스레드에서 실행합니다. 셸 문자열을 조합하지 않고 인자 배열로 실행합니다.
-- [OpenJFX Maven 가이드](https://openjfx.io/openjfx-docs/#maven), [JavaFX 25 요구사항](https://openjfx.io/highlights/25/), [Apache POI](https://poi.apache.org/).
+- [OpenJFX Gradle 가이드](https://openjfx.io/openjfx-docs/#gradle), [JavaFX 25 요구사항](https://openjfx.io/highlights/25/), [Apache POI](https://poi.apache.org/).
 
 ## 검증
 
 ```powershell
-.\mvnw.cmd clean verify
-.\mvnw.cmd javafx:run '-Djavafx.args=--smoke-test'
+.\gradlew.bat clean build
+.\gradlew.bat smokeTest
 ```
 
-`mvnw test`는 수식, 저장 형식, Git 초기 상태·파일명·원격 전송·충돌 보호 및 채우기를 검증합니다. UI smoke test는 실제 셀 편집, 수식 갱신, 실행 취소/다시 실행, 필터, 주소 이동, 저장 알림과 자동 닫힘, Gitea 선택 및 설정 저장까지 확인합니다. Linux CI에서는 Xvfb로 실행합니다. Microsoft Excel 애플리케이션 자체와의 수동 상호운용 테스트는 수행하지 않았습니다.
+`gradlew test`는 수식, 저장 형식, Git 초기 상태·파일명·원격 전송·충돌 보호 및 채우기를 검증합니다. UI smoke test는 실제 셀 편집, 수식 갱신, 실행 취소/다시 실행, 필터, 주소 이동, 저장 알림과 자동 닫힘, Gitea 선택 및 설정 저장까지 확인합니다. Linux CI에서는 Xvfb로 실행합니다. Microsoft Excel 애플리케이션 자체와의 수동 상호운용 테스트는 수행하지 않았습니다.
 
 [설계 및 확장 계획](docs/ARCHITECTURE.md)을 참고하세요.
 
 개발 재개 시에는 [진행 기록](docs/PROGRESS.md)의 완료 항목과 다음 작업을 먼저 확인하세요.
+
+### FXML 화면 및 빠른 입력
+
+메인 화면은 `src/main/resources/spreadsheet.fxml`에서 구성합니다. 메뉴·도구막대·수식 입력줄·표·상태 표시줄의 배치를 Scene Builder 또는 IntelliJ에서 편집할 수 있습니다. 동적 대화상자와 셀 렌더링은 Java 코드로 생성합니다.
+
+셀을 한 번 클릭한 뒤 문자를 입력하면 기존 값을 대체하는 편집을 시작합니다. F2/더블 클릭은 기존 값을 불러옵니다. Enter는 적용, Escape는 취소, Alt+Enter는 줄바꿈입니다.

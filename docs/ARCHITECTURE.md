@@ -3,7 +3,7 @@
 ## 구조
 
 ```text
-SpreadsheetApp (JavaFX UI, 선택/입력/보기)
+spreadsheet.fxml → SpreadsheetApp (FXML 컨트롤러, 선택/입력/보기)
     ├── Book (POI 워크북, 수식 캐시, 트랜잭션/실행 취소)
     ├── BookFiles (JSONL, XLSX, CSV, 원자적 저장)
     ├── SheetEdits (상대 참조 채우기, 찾기/바꾸기)
@@ -44,3 +44,7 @@ POI 객체는 UI 스레드에 한정한다. Git 작업만 가상 스레드에서
 | 6 · 고급 Excel | 피벗, 동적 배열 함수, 데이터 연결, 인쇄 | 기능별 호환성 코퍼스와 성능 예산 수립 |
 
 VBA, Power Query, Power Pivot은 독립적인 실행 엔진과 보안 모델이 필요한 큰 영역이다. 전체 Excel 호환성을 선언하려면 별도 장기 개발과 검증이 필요하다.
+
+## 빌드와 화면
+
+Gradle Wrapper 9.4.1과 JDK 25 toolchain을 사용한다. `gradlew build`는 테스트와 배포 ZIP/TAR을 생성하고 `gradlew run`은 앱, `gradlew smokeTest`는 실제 UI 검사를 실행한다. JavaFX 라이브러리를 현재 OS/아키텍처에 맞춰 선택하므로 배포 파일도 해당 플랫폼 전용이다. 메인 화면의 정적 레이아웃은 spreadsheet.fxml에 두고 셀·시트 및 동적 대화상자는 코드에서 생성한다.

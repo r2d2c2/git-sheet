@@ -2,3 +2,7 @@
 *.gsheet text eol=lf
 *.java text eol=lf
 *.xlsx binary
+
+gradlew text eol=lf
+*.fxml text eol=lf
+*.gradle text eol=lf

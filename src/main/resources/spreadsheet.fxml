@@ -1,0 +1,133 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?import javafx.scene.control.*?>
+<?import javafx.scene.layout.*?>
+<?import javafx.geometry.Insets?>
+<!-- Controller is supplied by SpreadsheetApp so the Application instance owns document state. -->
+<BorderPane xmlns:fx="http://javafx.com/fxml/1">
+  <top>
+    <VBox>
+      <MenuBar>
+        <menus>
+          <Menu text="파일">
+            <items>
+              <MenuItem text="새 문서" userData="newDocument" onAction="#dispatchAction"/>
+              <MenuItem text="열기 (.gsheet / .xlsx / .csv)" userData="openDocument" onAction="#dispatchAction"/>
+              <MenuItem text="저장" userData="saveDocument" onAction="#dispatchAction"/>
+              <MenuItem text="다른 이름으로 저장" userData="saveAs" onAction="#dispatchAction"/>
+              <SeparatorMenuItem/>
+              <MenuItem text="Excel 내보내기 (.xlsx)" userData="exportXlsx" onAction="#dispatchAction"/>
+              <MenuItem text="현재 시트 CSV 내보내기" userData="exportCsv" onAction="#dispatchAction"/>
+            </items>
+          </Menu>
+          <Menu text="편집">
+            <items>
+              <MenuItem text="실행 취소  Ctrl+Z" userData="undoEdit" onAction="#dispatchAction"/>
+              <MenuItem text="다시 실행  Ctrl+Y" userData="redoEdit" onAction="#dispatchAction"/>
+              <MenuItem text="복사  Ctrl+C" userData="copyCells" onAction="#dispatchAction"/>
+              <MenuItem text="잘라내기  Ctrl+X" userData="cutCells" onAction="#dispatchAction"/>
+              <MenuItem text="붙여넣기  Ctrl+V" userData="pasteCells" onAction="#dispatchAction"/>
+              <MenuItem text="값만 붙여넣기" userData="pasteValues" onAction="#dispatchAction"/>
+              <MenuItem text="서식만 붙여넣기" userData="pasteFormats" onAction="#dispatchAction"/>
+              <MenuItem text="내용 지우기" userData="clearCells" onAction="#dispatchAction"/>
+              <MenuItem text="찾기" userData="findCells" onAction="#dispatchAction"/>
+              <MenuItem text="찾기 및 바꾸기" userData="replaceCells" onAction="#dispatchAction"/>
+              <SeparatorMenuItem/>
+              <MenuItem text="아래로 채우기  Ctrl+D" userData="fillDown" onAction="#dispatchAction"/>
+              <MenuItem text="오른쪽 채우기  Ctrl+R" userData="fillRight" onAction="#dispatchAction"/>
+            </items>
+          </Menu>
+          <Menu text="서식">
+            <items>
+              <MenuItem text="왼쪽 정렬" userData="alignLeft" onAction="#dispatchAction"/>
+              <MenuItem text="가운데 정렬" userData="alignCenter" onAction="#dispatchAction"/>
+              <MenuItem text="오른쪽 정렬" userData="alignRight" onAction="#dispatchAction"/>
+              <MenuItem text="모든 테두리" userData="borderAll" onAction="#dispatchAction"/>
+              <MenuItem text="테두리 없음" userData="borderNone" onAction="#dispatchAction"/>
+              <MenuItem text="글꼴 크기" userData="fontSize" onAction="#dispatchAction"/>
+              <MenuItem text="열 너비" userData="columnWidth" onAction="#dispatchAction"/>
+              <MenuItem text="행 높이…" userData="rowHeight" onAction="#dispatchAction"/>
+              <MenuItem text="행 높이 자동" userData="autoRowHeight" onAction="#dispatchAction"/>
+              <MenuItem text="셀 줄바꿈 켜기" userData="wrapOn" onAction="#dispatchAction"/>
+              <MenuItem text="셀 줄바꿈 끄기" userData="wrapOff" onAction="#dispatchAction"/>
+            </items>
+          </Menu>
+          <Menu text="시트">
+            <items>
+              <MenuItem text="시트 추가" userData="addSheet" onAction="#dispatchAction"/>
+              <MenuItem text="시트 이름 변경" userData="renameSheet" onAction="#dispatchAction"/>
+              <MenuItem text="시트 삭제" userData="deleteSheet" onAction="#dispatchAction"/>
+              <SeparatorMenuItem/>
+              <MenuItem text="선택 행 위에 삽입" userData="insertRows" onAction="#dispatchAction"/>
+              <MenuItem text="선택 행 전체 삭제" userData="deleteRows" onAction="#dispatchAction"/>
+              <MenuItem text="선택 열 왼쪽에 삽입" userData="insertColumns" onAction="#dispatchAction"/>
+              <MenuItem text="선택 열 전체 삭제" userData="deleteColumns" onAction="#dispatchAction"/>
+              <SeparatorMenuItem/>
+              <MenuItem text="이전 1,000행" userData="previousPage" onAction="#dispatchAction"/>
+              <MenuItem text="다음 1,000행" userData="nextPage" onAction="#dispatchAction"/>
+            </items>
+          </Menu>
+          <Menu text="데이터">
+            <items>
+              <MenuItem text="범위 데이터 정렬…" userData="sortRange" onAction="#dispatchAction"/>
+              <MenuItem text="열별 필터…" userData="filterRange" onAction="#dispatchAction"/>
+              <MenuItem text="열별 필터 해제" userData="clearFilter" onAction="#dispatchAction"/>
+            </items>
+          </Menu>
+          <Menu text="Git">
+            <items>
+              <MenuItem text="서버 연결 / 동기화" userData="gitConnect" onAction="#dispatchAction"/>
+              <MenuItem text="문서 변경 내용 / 기록" userData="gitInspect" onAction="#dispatchAction"/>
+              <MenuItem text="문서 저장 후 커밋" userData="gitCommit" onAction="#dispatchAction"/>
+            </items>
+          </Menu>
+          <Menu text="도움말">
+            <items>
+              <MenuItem text="사용법 및 호환성" userData="help" onAction="#dispatchAction"/>
+            </items>
+          </Menu>
+        </menus>
+      </MenuBar>
+      <ToolBar>
+        <items>
+          <Button text="새 문서" userData="new" onAction="#dispatchAction"/>
+          <Button text="열기" userData="open" onAction="#dispatchAction"/>
+          <Button text="저장" userData="save" onAction="#dispatchAction"/>
+          <Button text="↶" userData="undo" onAction="#dispatchAction"/>
+          <Button text="↷" userData="redo" onAction="#dispatchAction"/>
+          <Button text="굵게" userData="bold" onAction="#dispatchAction"/>
+          <Button text="기울임" userData="italic" onAction="#dispatchAction"/>
+          <Button text="노란 배경" userData="fill" onAction="#dispatchAction"/>
+          <ComboBox fx:id="formats"/>
+          <Button text="화면 A→Z" userData="ascending" onAction="#dispatchAction"/>
+          <Button text="화면 Z→A" userData="descending" onAction="#dispatchAction"/>
+          <TextField fx:id="filter" promptText="현재 화면 행 필터" prefWidth="165"/>
+          <Button text="차트" userData="chart" onAction="#dispatchAction"/>
+          <Button text="Git" userData="git" onAction="#dispatchAction"/>
+        </items>
+      </ToolBar>
+      <HBox spacing="10">
+        <padding>
+          <Insets top="9" right="12" bottom="9" left="12"/>
+        </padding>
+        <TextField fx:id="address" text="A1" prefWidth="100" maxWidth="100"/>
+        <Label text="fx"/>
+        <TextArea fx:id="formula" promptText="값 또는 =수식을 입력하세요" prefRowCount="2" wrapText="true" HBox.hgrow="ALWAYS"/>
+      </HBox>
+    </VBox>
+  </top>
+  <center>
+    <TableView fx:id="grid" editable="true"/>
+  </center>
+  <bottom>
+    <VBox>
+      <TabPane fx:id="tabs" tabClosingPolicy="UNAVAILABLE" prefHeight="40"/>
+      <HBox spacing="20">
+        <padding>
+          <Insets top="8" right="14" bottom="8" left="14"/>
+        </padding>
+        <Label fx:id="status" text="준비"/>
+        <Label fx:id="selectionInfo"/>
+      </HBox>
+    </VBox>
+  </bottom>
+</BorderPane>
