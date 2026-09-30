@@ -115,7 +115,7 @@ public final class SpreadsheetApp extends Application {
         var git = new Menu("Git"); git.getItems().addAll(item("서버 연결 / 동기화", this::gitConnect), item("문서 변경 내용 / 기록", this::gitInspect), item("문서 저장 후 커밋", this::gitCommit));
         var help = new Menu("도움말"); help.getItems().add(item("사용법 및 호환성", () -> textDialog("Git Sheet 0.2", "JDK 25 + JavaFX\n\n"
                 + "더블 클릭 / F2: 셀 편집 · Enter: 적용 · Escape: 취소\n수식: =SUM(A1:A10), =IF(B1>0,\"예\",\"아니오\")\n"
-                + "주소 상자: A1 또는 Z10000 입력 → 이동\n정렬·필터는 현재 1,000행 화면에만 적용되며 원본 행은 이동하지 않습니다.\n"
+                + "주소 상자: A1 또는 Z10000 입력 → 이동\n도구막대 정렬·필터는 현재 1,000행 화면에 적용됩니다. 데이터 메뉴에서 실제 범위 정렬을 사용할 수 있습니다.\n"
                 + "Ctrl+C/V: 탭으로 구분된 직사각형 데이터 복사·붙여넣기\nCtrl+D/R: 아래로/오른쪽 채우기 (상대 참조 이동)\nCtrl+S: Git 친화적인 .gsheet 저장 · 저장 위치 알림 4초\n"
                 + "Git → 서버 연결 / 동기화: GitHub·GitLab·Gitea·자체 서버 선택, push/fetch\n\n"
                 + "지원: 값, POI 지원 수식, 기본 서식, 다중 시트, CSV/XLSX, 실행 취소, Git diff/commit, 간단한 차트\n"
@@ -123,7 +123,8 @@ public final class SpreadsheetApp extends Application {
                 + ".gsheet 변환은 그림, 이름 정의, 유효성 검사, 조건부 서식 등 고급 Excel 요소를 보존하지 않습니다.\n"
                 + "병합·틀 고정 정보는 저장되지만 화면에는 반영되지 않습니다. 원본 .xlsx는 따로 보관하세요.\n"
                 + "외부 연결은 갱신하지 않으며 지원하지 않는 수식은 #UNSUPPORTED!로 표시됩니다.")));
-        return new MenuBar(file, edit, format, sheet, git, help);
+        var data = new Menu("데이터"); data.getItems().add(item("범위 데이터 정렬…", this::sortRange));
+        return new MenuBar(file, edit, format, sheet, data, git, help);
     }
     private ToolBar toolbar() {
         var formats = new ComboBox<String>(FXCollections.observableArrayList("일반", "숫자", "통화", "백분율", "날짜"));
@@ -135,7 +136,7 @@ public final class SpreadsheetApp extends Application {
                 new Separator(), button("↶", this::undo), button("↷", this::redo), new Separator(),
                 button("굵게", () -> toggleFont("bold")), button("기울임", () -> toggleFont("italic")),
                 button("노란 배경", () -> applyStyle("fill", Short.toString(IndexedColors.LIGHT_YELLOW.getIndex()))), formats,
-                new Separator(), button("A→Z", () -> sort(false)), button("Z→A", () -> sort(true)), filter,
+                new Separator(), button("화면 A→Z", () -> sort(false)), button("화면 Z→A", () -> sort(true)), filter,
                 button("차트", this::chart), button("Git", this::gitConnect));
     }
     private HBox formulaBar() {
@@ -341,6 +342,34 @@ public final class SpreadsheetApp extends Application {
             return descending ? -comparison : comparison;
         };
         grid.getItems().sort(comparator); status.setText("현재 화면 정렬 · 원본 셀 주소와 수식은 유지됩니다.");
+    }
+    private void sortRange() {
+        if (pendingEdit != null && !pendingEdit.getAsBoolean()) return;
+        var selected = selectedPositions(); if (selected.isEmpty()) return;
+        int firstRow = selected.stream().mapToInt(Position::row).min().orElseThrow(), lastRow = selected.stream().mapToInt(Position::row).max().orElseThrow();
+        int firstColumn = selected.stream().mapToInt(Position::column).min().orElseThrow(), lastColumn = selected.stream().mapToInt(Position::column).max().orElseThrow();
+        var range = new TextField(Book.address(firstRow, firstColumn) + ":" + Book.address(lastRow, lastColumn));
+        var column = new TextField(CellReference.convertNumToColString(firstColumn));
+        range.setId("range-sort-area"); column.setId("range-sort-column");
+        var header = new CheckBox("첫 행은 제목 (정렬에서 제외)"); header.setSelected(true);
+        var descending = new CheckBox("내림차순");
+        var form = new GridPane(); form.setHgap(10); form.setVgap(10);
+        form.addRow(0, new Label("범위 (예: A1:D5000)"), range); form.addRow(1, new Label("기준 열 (예: B)"), column);
+        form.add(header, 0, 2, 2, 1); form.add(descending, 0, 3, 2, 1);
+        var note = new Label("지정한 직사각형의 실제 데이터를 행 단위로 재배열합니다.\n빈 값은 마지막, 같은 값은 기존 순서 유지. Ctrl+Z로 복구합니다.\n수식의 상대 참조는 새 행에 맞춰 이동하며 범위 밖 수식은 유지합니다.");
+        form.add(note, 0, 4, 2, 1);
+        var dialog = new Dialog<ButtonType>(); dialog.initOwner(stage); dialog.setTitle("범위 데이터 정렬");
+        dialog.getDialogPane().setId("range-sort-dialog");
+        dialog.getDialogPane().setContent(form); dialog.getDialogPane().getButtonTypes().addAll(ButtonType.OK, ButtonType.CANCEL);
+        dialog.showAndWait().filter(ButtonType.OK::equals).ifPresent(_ -> {
+            try {
+                var area = org.apache.poi.ss.util.CellRangeAddress.valueOf(range.getText().trim().toUpperCase(Locale.ROOT));
+                int key = CellReference.convertColStringToIndex(column.getText().trim().toUpperCase(Locale.ROOT));
+                if (mutate(() -> RangeSort.sort(book, sheetIndex, area, key, header.isSelected(), descending.isSelected()))) {
+                    filter.clear(); refresh(); status.setText(area.formatAsString() + " 데이터 정렬 완료 · Ctrl+Z로 실행 취소");
+                }
+            } catch (Exception e) { error(e); }
+        });
     }
     private void find() {
         prompt("찾기", "현재 시트에서 찾을 값 또는 수식", "").ifPresent(needle -> {
@@ -548,6 +577,20 @@ public final class SpreadsheetApp extends Application {
         filter.clear(); address.setText("AZ2001"); goTo();
         if (rowWindow != 2000 || !Objects.equals(selected(), new Position(2000, 51))) throw new IllegalStateException("Navigation failed");
         address.setText("A1"); goTo(); grid.applyCss(); grid.layout();
+        Platform.runLater(() -> {
+            try {
+                var pane = Window.getWindows().stream().filter(w -> w.getScene() != null)
+                        .map(w -> w.getScene().lookup("#range-sort-dialog")).filter(n -> n instanceof DialogPane)
+                        .map(n -> (DialogPane) n).findFirst().orElseThrow();
+                ((TextField) pane.lookup("#range-sort-area")).setText("A1:D4");
+                ((TextField) pane.lookup("#range-sort-column")).setText("B");
+                ((Button) pane.lookupButton(ButtonType.OK)).fire();
+            } catch (Exception e) { failSmoke(e); }
+        });
+        sortRange();
+        if (!book.raw(0, 1, 0).equals("허브") || !book.raw(0, 1, 3).equals("=B2*C2") || !book.raw(0, 0, 0).equals("품목"))
+            throw new IllegalStateException("Range sort dialog failed");
+        undo(); address.setText("A1"); goTo();
         String original = book.raw(0, 0, 0);
         pendingCut = new CutRange(0, 0, 0, 1, 1);
         pasteCut(pendingCut, 15, 0);
