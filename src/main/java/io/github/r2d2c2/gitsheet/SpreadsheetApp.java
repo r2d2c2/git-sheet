@@ -40,7 +40,8 @@ public final class SpreadsheetApp extends Application {
     private static final int ROW_WINDOW = 1000, COLUMN_WINDOW = 52;
     private final TableView<Integer> grid = new TableView<>();
     private final TabPane tabs = new TabPane();
-    private final TextField address = new TextField("A1"), formula = new TextField(), filter = new TextField();
+    private final TextField address = new TextField("A1"), filter = new TextField();
+    private final TextArea formula = new TextArea();
     private final Label status = new Label("준비"), selectionInfo = new Label();
     private final ExecutorService background = Executors.newVirtualThreadPerTaskExecutor();
     private boolean changingTabs;
@@ -48,6 +49,7 @@ public final class SpreadsheetApp extends Application {
     private GitDialog gitDialog;
     private boolean gitBusy;
     private BooleanSupplier pendingEdit;
+    private final javafx.animation.PauseTransition rowLayoutRefresh = new javafx.animation.PauseTransition(javafx.util.Duration.millis(100));
     private record Position(int row, int column) {}
     private record Bounds(int firstRow, int lastRow, int firstCol, int lastCol) {}
 
@@ -57,6 +59,15 @@ public final class SpreadsheetApp extends Application {
         var root = new BorderPane();
         root.setTop(new VBox(menu(), toolbar(), formulaBar()));
         grid.setEditable(true); grid.setFixedCellSize(-1); grid.getSelectionModel().setCellSelectionEnabled(true);
+        rowLayoutRefresh.setOnFinished(_ -> grid.refresh());
+        grid.setRowFactory(_ -> new TableRow<>() {
+            @Override protected void updateItem(Integer index, boolean empty) {
+                super.updateItem(index, empty);
+                var row = empty || index == null ? null : book.workbook().getSheetAt(sheetIndex).getRow(index);
+                double height = row != null && row.getCTRow().isSetHt() ? Math.max(1, row.getHeightInPoints() * 96.0 / 72) : USE_COMPUTED_SIZE;
+                setMinHeight(height); setPrefHeight(height); setMaxHeight(height);
+            }
+        });
         grid.getSelectionModel().setSelectionMode(SelectionMode.MULTIPLE);
         grid.getSelectionModel().getSelectedCells().addListener((javafx.collections.ListChangeListener<TablePosition>) change -> selectionChanged());
         grid.setOnKeyPressed(this::gridKey);
@@ -107,7 +118,8 @@ public final class SpreadsheetApp extends Application {
                 item("글꼴 크기", () -> prompt("글꼴 크기", "크기 (6–72)", "13").ifPresent(value -> {
                     try { int size = Integer.parseInt(value); if (size < 6 || size > 72) throw new IllegalArgumentException("6–72 범위의 크기를 입력하세요."); applyStyle("size", value); }
                     catch (Exception e) { error(e); }
-                })), item("열 너비", this::columnWidth));
+                })), item("열 너비", this::columnWidth), item("행 높이…", this::rowHeight), item("행 높이 자동", () -> applyRowHeight(null)),
+                item("셀 줄바꿈 켜기", () -> applyStyle("wrap", "true")), item("셀 줄바꿈 끄기", () -> applyStyle("wrap", "false")));
         var sheet = new Menu("시트"); sheet.getItems().addAll(item("시트 추가", this::addSheet), item("시트 이름 변경", this::renameSheet),
                 item("시트 삭제", this::deleteSheet), new SeparatorMenuItem(),
                 item("선택 행 위에 삽입", () -> structuralEdit(StructuralEdits.Axis.ROW, true)),
@@ -146,7 +158,14 @@ public final class SpreadsheetApp extends Application {
     private HBox formulaBar() {
         address.setPrefWidth(100); address.setMaxWidth(100); address.setOnAction(_ -> goTo());
         formula.setPromptText("값 또는 =수식을 입력하세요"); HBox.setHgrow(formula, Priority.ALWAYS);
-        formula.setOnAction(_ -> { var p = selected(); if (p != null) mutate(() -> book.set(sheetIndex, p.row(), p.column(), formula.getText())); });
+        formula.setPrefRowCount(2); formula.setWrapText(true);
+        formula.addEventFilter(KeyEvent.KEY_PRESSED, event -> {
+            if (event.getCode() == KeyCode.ENTER) {
+                if (event.isAltDown()) formula.replaceSelection("\n");
+                else { var p = selected(); if (p != null) mutate(() -> book.set(sheetIndex, p.row(), p.column(), formula.getText())); }
+                event.consume();
+            } else if (event.getCode() == KeyCode.ESCAPE) { selectionChanged(); event.consume(); }
+        });
         var bar = new HBox(10, address, new Label("fx"), formula); bar.setPadding(new Insets(9, 12, 9, 12)); return bar;
     }
     private static Button button(String text, Runnable action) { var b = new Button(text); b.setOnAction(_ -> action.run()); return b; }
@@ -165,7 +184,8 @@ public final class SpreadsheetApp extends Application {
             final int columnIndex = c;
             var column = new TableColumn<Integer, String>(CellReference.convertNumToColString(c));
             column.setUserData(c); column.setSortable(false);
-            column.setPrefWidth(Math.max(95, book.workbook().getSheetAt(sheetIndex).getColumnWidthInPixels(c)));
+            column.setMinWidth(24); column.setPrefWidth(Math.max(24, book.workbook().getSheetAt(sheetIndex).getColumnWidthInPixels(c)));
+            column.widthProperty().addListener((_, _, _) -> rowLayoutRefresh.playFromStart());
             column.setCellValueFactory(data -> new ReadOnlyStringWrapper(book.display(sheetIndex, data.getValue(), columnIndex)));
             column.setCellFactory(_ -> new GridCell(columnIndex));
             grid.getColumns().add(column);
@@ -479,6 +499,16 @@ public final class SpreadsheetApp extends Application {
             mutate(() -> { int count = SheetEdits.replaceAll(book, sheetIndex, find.getText(), replacement.getText(), matchCase.isSelected(), formulas.isSelected()); status.setText(count + "개 셀을 바꿨습니다."); });
         }
     }
+    private void rowHeight() {
+        if (pendingEdit != null && !pendingEdit.getAsBoolean()) return;
+        prompt("행 높이", "높이 (1–409 포인트)", "30").ifPresent(value -> {
+            try { applyRowHeight(Double.parseDouble(value)); } catch (Exception e) { error(e); }
+        });
+    }
+    private void applyRowHeight(Double points) {
+        var rows = selectedPositions().stream().map(Position::row).distinct().toList();
+        if (!rows.isEmpty()) mutate(() -> rows.forEach(r -> book.setRowHeight(sheetIndex, r, points)));
+    }
     private void columnWidth() {
         var positions = selectedPositions(); if (positions.isEmpty()) return;
         prompt("열 너비", "문자 기준 너비 (1–255)", "15").ifPresent(value -> {
@@ -629,8 +659,8 @@ public final class SpreadsheetApp extends Application {
     private void smokeTest() {
         grid.getSelectionModel().clearAndSelect(1, grid.getColumns().get(2));
         grid.edit(1, grid.getColumns().get(2)); grid.applyCss(); grid.layout();
-        var editor = grid.lookupAll(".text-field").stream().filter(n -> n instanceof TextField && n.isVisible()).map(n -> (TextField)n).findFirst().orElseThrow();
-        editor.setText("5"); editor.fireEvent(new javafx.event.ActionEvent());
+        var editor = grid.lookupAll(".text-area").stream().filter(n -> n instanceof TextArea && n.isVisible()).map(n -> (TextArea)n).findFirst().orElseThrow();
+        editor.setText("5"); editor.fireEvent(new KeyEvent(KeyEvent.KEY_PRESSED, "", "", KeyCode.ENTER, false, false, false, false));
         if (!book.raw(0, 1, 1).equals("5") || !book.display(0, 1, 3).equals("₩600,000")) throw new IllegalStateException("Edit/recalculation failed");
         undo(); if (!book.raw(0, 1, 1).equals("3")) throw new IllegalStateException("Undo failed");
         redo(); if (!book.raw(0, 1, 1).equals("5")) throw new IllegalStateException("Redo failed");
@@ -656,6 +686,25 @@ public final class SpreadsheetApp extends Application {
             throw new IllegalStateException("Range sort dialog failed");
         undo(); address.setText("A1"); goTo();
         String original = book.raw(0, 0, 0);
+        book.transaction(x -> { x.set(0, 0, 0, "줄바꿈 text ".repeat(30)); x.style(0, 0, 0, "wrap", "true"); });
+        refresh(); smokeLayout();
+        double narrow = smokeCell(0, 0).getTableRow().getHeight();
+        grid.getColumns().get(1).setPrefWidth(400); grid.refresh(); smokeLayout();
+        double wide = smokeCell(0, 0).getTableRow().getHeight();
+        if (narrow <= wide || wide < 40) throw new IllegalStateException("Wrap height did not follow column width: " + narrow + "/" + wide);
+        grid.getSelectionModel().clearAndSelect(0, grid.getColumns().get(1)); applyRowHeight(30.0); smokeLayout();
+        if (Math.abs(smokeCell(0, 0).getTableRow().getHeight() - 40) > 2) throw new IllegalStateException("Manual row height failed");
+        applyRowHeight(null); smokeLayout();
+        if (smokeCell(0, 0).getTableRow().getHeight() < 50) throw new IllegalStateException("Automatic row height failed");
+        undo(); undo(); undo(); address.setText("A1"); goTo();
+        grid.edit(0, grid.getColumns().get(1)); smokeLayout();
+        var multiline = smokeCell(0, 0).editor; multiline.setText("line 1"); multiline.positionCaret(multiline.getLength());
+        multiline.fireEvent(new KeyEvent(KeyEvent.KEY_PRESSED, "", "", KeyCode.ENTER, false, false, true, false));
+        multiline.appendText("line 2");
+        if (!pendingEdit.getAsBoolean() || !book.raw(0, 0, 0).equals("line 1\nline 2")) throw new IllegalStateException("Multiline editor failed");
+        formula.fireEvent(new KeyEvent(KeyEvent.KEY_PRESSED, "", "", KeyCode.ENTER, false, false, false, false));
+        if (!book.raw(0, 0, 0).equals("line 1\nline 2")) throw new IllegalStateException("Formula bar lost line breaks");
+        undo(); undo(); address.setText("A1"); goTo();
         Platform.runLater(() -> {
             try {
                 var pane = Window.getWindows().stream().filter(w -> w.getScene() != null)
@@ -698,6 +747,12 @@ public final class SpreadsheetApp extends Application {
         structuralEdit(StructuralEdits.Axis.COLUMN, true);
         if (!book.raw(0, 0, 1).equals(original)) throw new IllegalStateException("Insert column failed");
         undo(); address.setText("A1"); goTo();
+    }
+    private void smokeLayout() { stage.getScene().getRoot().applyCss(); stage.getScene().getRoot().layout(); grid.layout(); }
+    private GridCell smokeCell(int row, int column) {
+        return grid.lookupAll(".table-cell").stream().filter(n -> n instanceof GridCell)
+                .map(n -> (GridCell) n).filter(c -> c.getTableRow().getItem() != null && c.getTableRow().getItem() == row && c.column == column)
+                .findFirst().orElseThrow();
     }
     private void screenshot(Path path) throws IOException {
         var image = stage.getScene().getRoot().snapshot(null, null);
@@ -742,16 +797,18 @@ public final class SpreadsheetApp extends Application {
     private static void failSmoke(Throwable failure) { failure.printStackTrace(); System.exit(1); }
     private final class GridCell extends TableCell<Integer, String> {
         private final int column;
-        private TextField editor;
+        private TextArea editor;
         GridCell(int column) { this.column = column; }
         @Override protected void updateItem(String value, boolean empty) {
             super.updateItem(value, empty);
+            setWrapText(false);
             if (empty) { setText(null); setGraphic(null); setStyle(""); return; }
             if (!isEditing()) { setText(value); setGraphic(null); }
             int row = getTableRow().getItem() == null ? -1 : getTableRow().getItem();
             var cell = row < 0 ? null : book.cell(sheetIndex, row, column, false);
             if (cell == null) { setStyle(""); return; }
             var style = cell.getCellStyle(); var font = book.workbook().getFontAt(style.getFontIndex());
+            setWrapText(style.getWrapText());
             var css = new StringBuilder("-fx-font-weight:").append(font.getBold() ? "bold" : "normal").append(";-fx-font-style:").append(font.getItalic() ? "italic" : "normal").append(';');
             if (style instanceof org.apache.poi.xssf.usermodel.XSSFCellStyle xs && style.getFillPattern() == FillPatternType.SOLID_FOREGROUND && !isSelected()) {
                 var color = xs.getFillForegroundXSSFColor(); var rgb = color == null ? null : color.getRGB();
@@ -770,9 +827,15 @@ public final class SpreadsheetApp extends Application {
         @Override public void startEdit() {
             if (isEmpty()) return;
             super.startEdit(); int row = getTableRow().getItem();
-            editor = new TextField(book.input(sheetIndex, row, column));
+            editor = new TextArea(book.input(sheetIndex, row, column)); editor.setWrapText(true); editor.setPrefRowCount(2);
             pendingEdit = () -> finish(row);
-            editor.setOnAction(_ -> finish(row)); editor.setOnKeyPressed(event -> { if (event.getCode() == KeyCode.ESCAPE) { cancelEdit(); event.consume(); } });
+            editor.addEventFilter(KeyEvent.KEY_PRESSED, event -> {
+                if (event.getCode() == KeyCode.ESCAPE) { cancelEdit(); event.consume(); }
+                else if (event.getCode() == KeyCode.ENTER) {
+                    if (event.isAltDown()) editor.replaceSelection("\n"); else finish(row);
+                    event.consume();
+                }
+            });
             editor.focusedProperty().addListener((_, _, focus) -> { if (!focus && isEditing()) finish(row); });
             setText(null); setGraphic(editor); editor.requestFocus(); editor.selectAll();
         }
@@ -782,6 +845,10 @@ public final class SpreadsheetApp extends Application {
             return mutate(() -> book.set(sheetIndex, row, column, text));
         }
         @Override public void cancelEdit() { pendingEdit = null; super.cancelEdit(); setGraphic(null); setText(getItem()); }
+        @Override protected double computePrefHeight(double width) {
+            double available = getWidth() > 0 ? getWidth() : getTableColumn() == null ? width : getTableColumn().getWidth();
+            return Math.min(409 * 96.0 / 72, super.computePrefHeight(isWrapText() ? Math.max(24, available) : width));
+        }
     }
     @Override public void stop() throws Exception { background.shutdownNow(); book.close(); }
 }

@@ -68,6 +68,14 @@ public final class Book implements AutoCloseable {
         }
         evaluator.clearAllCachedResultValues();
     }
+    public void setRowHeight(int sheet, int row, Double points) {
+        cell(sheet, row, 0, false);
+        if (points != null && (!Double.isFinite(points) || points < 1 || points > 409))
+            throw new IllegalArgumentException("행 높이는 1–409 포인트 범위로 입력하세요.");
+        var s = workbook.getSheetAt(sheet); var r = s.getRow(row);
+        if (r == null && points != null) r = s.createRow(row);
+        if (r != null) { if (points == null) r.setHeight((short) -1); else r.setHeightInPoints(points.floatValue()); }
+    }
     public void transaction(Consumer<Book> change) {
         var before = snapshot();
         try { change.accept(this); }

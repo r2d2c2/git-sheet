@@ -48,8 +48,9 @@ public final class BookFiles {
                 }
                 line(writer, record);
                 for (var row : sheet) {
-                    if (row.getHeight() != sheet.getDefaultRowHeight() || row.getZeroHeight()) {
+                    if (((XSSFRow) row).getCTRow().isSetHt() || row.getZeroHeight()) {
                         var r = record("row"); r.addProperty("row", row.getRowNum()); r.addProperty("height", row.getHeight());
+                        r.addProperty("customHeight", ((XSSFRow) row).getCTRow().isSetHt());
                         r.addProperty("hidden", row.getZeroHeight()); line(writer, r);
                     }
                     for (var cell : row) {
@@ -89,7 +90,8 @@ public final class BookFiles {
                     }
                     case "row" -> {
                         Objects.requireNonNull(sheet, "시트가 없습니다.");
-                        var row = sheet.createRow(item.get("row").getAsInt()); row.setHeight(item.get("height").getAsShort());
+                        var row = sheet.createRow(item.get("row").getAsInt());
+                        if (!item.has("customHeight") || item.get("customHeight").getAsBoolean()) row.setHeight(item.get("height").getAsShort());
                         row.setZeroHeight(item.get("hidden").getAsBoolean());
                     }
                     case "cell" -> {
