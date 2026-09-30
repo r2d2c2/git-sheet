@@ -21,6 +21,9 @@ public final class CellClipboard {
         if (rows < 1 || columns < 1) throw new IllegalArgumentException("복사 범위가 비어 있습니다.");
         book.cell(sheet, top, left, false);
         book.cell(sheet, Math.addExact(top, rows - 1), Math.addExact(left, columns - 1), false);
+        var sourceRange = new org.apache.poi.ss.util.CellRangeAddress(top, top + rows - 1, left, left + columns - 1);
+        for (var merged : book.workbook().getSheetAt(sheet).getMergedRegions())
+            if (merged.intersects(sourceRange)) throw new IllegalArgumentException("병합 셀 복사는 아직 지원하지 않습니다. 병합을 해제한 뒤 복사해 주세요.");
         this.sheet = sheet; this.top = top; this.left = left; this.rows = rows; this.columns = columns;
         sheetName = book.workbook().getSheetName(sheet);
         var evaluator = book.workbook().getCreationHelper().createFormulaEvaluator();
@@ -58,6 +61,7 @@ public final class CellClipboard {
     public void paste(Book target, int targetSheet, int row, int column, Mode mode) {
         target.cell(targetSheet, row, column, false);
         target.cell(targetSheet, Math.addExact(row, rows - 1), Math.addExact(column, columns - 1), false);
+        SheetEdits.checkWritableRange(target, targetSheet, row, row + rows - 1, column, column + columns - 1);
         if (mode == Mode.VALUES) for (var entry : entries)
             if (entry.calculationFailure() != null) throw new IllegalArgumentException(entry.calculationFailure());
         try (var styleBook = mode == Mode.VALUES ? null : new XSSFWorkbook(new ByteArrayInputStream(styleSnapshot))) {

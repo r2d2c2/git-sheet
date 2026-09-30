@@ -410,9 +410,9 @@ public final class SpreadsheetApp extends Application {
             if (start + rows.size() > grid.getItems().size()) throw new IllegalArgumentException("붙여넣기가 현재 1,000행 화면을 넘습니다. 주소로 이동하거나 파일 가져오기를 사용하세요.");
             int firstCol = (Integer) grid.getColumns().get(b.firstCol()).getUserData();
             if (rows.stream().anyMatch(r -> firstCol + r.size() > Book.MAX_COLUMNS)) throw new IllegalArgumentException("최대 열 범위를 넘습니다.");
-            mutate(() -> { for (int r = 0; r < rows.size(); r++) for (int c = 0; c < rows.get(r).size(); c++)
-                book.set(sheetIndex, grid.getItems().get(start + r), firstCol + c,
-                        mode == CellClipboard.Mode.VALUES ? "'" + rows.get(r).get(c) : rows.get(r).get(c)); });
+            var values = rows.stream().map(record -> record.toList()).toList();
+            mutate(() -> SheetEdits.pasteText(book, sheetIndex, grid.getItems().get(start), firstCol, values,
+                    mode == CellClipboard.Mode.VALUES));
         } catch (Exception e) { error(e); }
     }
     private void pasteCut(CutRange cut, int row, int column) {
