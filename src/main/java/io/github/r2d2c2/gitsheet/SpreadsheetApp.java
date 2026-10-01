@@ -983,6 +983,11 @@ public final class SpreadsheetApp extends Application {
                 || Math.abs(label.getHeight() - expectedHeight) > 2)
             throw new IllegalStateException("Merge span incorrect: " + label.getWidth() + "x" + label.getHeight()
                     + " expected " + expectedWidth + "x" + expectedHeight);
+        double originalColumnWidth = grid.getColumns().get(1).getPrefWidth();
+        double originalMergeWidth = label.getWidth();
+        grid.getColumns().get(1).setPrefWidth(originalColumnWidth + 80); smokeLayout();
+        if (Math.abs(label.getWidth() - originalMergeWidth - 80) > 2) throw new IllegalStateException("Merge did not resize with column");
+        grid.getColumns().get(1).setPrefWidth(originalColumnWidth); smokeLayout();
         screenshot(Path.of("build/merged-cell-smoke.png"));
         grid.scrollTo(50); smokeLayout();
         if (!mergeLayer.getChildren().isEmpty()) throw new IllegalStateException("Offscreen merge remained visible");
@@ -999,6 +1004,20 @@ public final class SpreadsheetApp extends Application {
         if (!mergeLayer.getChildren().isEmpty() || book.workbook().getSheetAt(0).getNumMergedRegions() != 0)
             throw new IllegalStateException("Unmerge failed");
         undo(); undo(); undo(); address.setText("A1"); goTo(); smokeLayout();
+        book.transaction(b -> {
+            b.set(0, 998, 0, "Across pages");
+            MergeEdits.merge(b, 0, org.apache.poi.ss.util.CellRangeAddress.valueOf("A999:B1001"));
+        });
+        address.setText("B1001"); goTo(); smokeLayout();
+        if (rowWindow != 1000 || mergeLayer.getChildren().size() != 1
+                || !((Label) mergeLayer.getChildren().getFirst()).getText().equals("Across pages"))
+            throw new IllegalStateException("Merge fragment at page boundary missing");
+        grid.getFocusModel().focus(0, grid.getColumns().get(2));
+        grid.fireEvent(new KeyEvent(KeyEvent.KEY_TYPED, "boundary", "", KeyCode.UNDEFINED, false, false, false, false));
+        if (pendingEdit == null || !pendingEdit.getAsBoolean() || rowWindow != 0
+                || !book.raw(0, 998, 0).equals("boundary") || !book.raw(0, 1000, 1).isEmpty())
+            throw new IllegalStateException("Page-boundary editing did not reach merge anchor");
+        undo(); undo(); address.setText("A1"); goTo(); smokeLayout();
     }
     private void smokeSaveAndGit() throws Exception {
         var folder = Files.createTempDirectory(Path.of("build"), "ui-smoke-").toAbsolutePath();
