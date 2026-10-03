@@ -48,3 +48,5 @@ VBA, Power Query, Power Pivot은 독립적인 실행 엔진과 보안 모델이 
 ## 빌드와 화면
 
 Gradle Wrapper 9.4.1과 JDK 25 toolchain을 사용한다. `gradlew build`는 테스트와 배포 ZIP/TAR을 생성하고 `gradlew run`은 앱, `gradlew smokeTest`는 실제 UI 검사를 실행한다. JavaFX 라이브러리를 현재 OS/아키텍처에 맞춰 선택하므로 배포 파일도 해당 플랫폼 전용이다. 메인 화면의 정적 레이아웃은 spreadsheet.fxml에 두고 셀·시트 및 동적 대화상자는 코드에서 생성한다.
+
+병합 표시 책임은 `MergedCellOverlay`에 분리되어 있다. 현재 워크북/시트/선택은 공급자로 읽고, 앵커 선택·편집 및 CSS 생성은 컨트롤러 콜백으로 연결한다. 뷰의 종료 시 대기 중 repaint를 무효화한 뒤 워크북을 닫는다.

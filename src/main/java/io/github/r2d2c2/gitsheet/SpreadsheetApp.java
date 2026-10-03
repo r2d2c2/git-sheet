@@ -43,8 +43,7 @@ public final class SpreadsheetApp extends Application {
     @FXML private TableView<Integer> grid;
     @FXML private TabPane tabs;
     @FXML private Pane mergeLayer;
-    private boolean mergePaintPending;
-    private final Map<String, Label> mergeLabels = new HashMap<>();
+    private MergedCellOverlay mergeOverlay;
     @FXML private TextField address, filter;
     @FXML private TextArea formula;
     @FXML private Label status, selectionInfo;
@@ -66,12 +65,9 @@ public final class SpreadsheetApp extends Application {
         loader.setController(this);
         BorderPane root = loader.load();
         bindActions(); configureInputs();
-        grid.needsLayoutProperty().addListener((_, _, needed) -> { if (needed) requestMergePaint(); });
-        grid.addEventHandler(ScrollEvent.SCROLL, _ -> requestMergePaint());
-        grid.addEventHandler(MouseEvent.MOUSE_DRAGGED, _ -> requestMergePaint());
-        grid.editingCellProperty().addListener((_, _, _) -> requestMergePaint());
-        mergeLayer.widthProperty().addListener((_, _, _) -> requestMergePaint());
-        mergeLayer.heightProperty().addListener((_, _, _) -> requestMergePaint());
+        mergeOverlay = new MergedCellOverlay(grid, mergeLayer, () -> book, () -> sheetIndex,
+                () -> { var p = selected(); return p == null ? null : new org.apache.poi.ss.util.CellAddress(p.row(), p.column()); },
+                (p, edit) -> focusMergeAnchor(new Position(p.getRow(), p.getColumn()), edit), this::cellCss);
         grid.setEditable(true); grid.setFixedCellSize(-1); grid.getSelectionModel().setCellSelectionEnabled(true);
         rowLayoutRefresh.setOnFinished(_ -> grid.refresh());
         grid.setRowFactory(_ -> new TableRow<>() {
@@ -317,64 +313,8 @@ public final class SpreadsheetApp extends Application {
         if (edit) grid.edit(row, column);
         requestMergePaint();
     }
-    private void requestMergePaint() {
-        if (mergeLayer == null || mergePaintPending) return;
-        mergePaintPending = true;
-        Platform.runLater(() -> { try { paintMerges(); } finally { mergePaintPending = false; } });
-    }
-    private void paintMerges() {
-        if (grid.getScene() == null) return;
-        var sheet = book.workbook().getSheetAt(sheetIndex);
-        var ranges = sheet.getMergedRegions();
-        if (ranges.isEmpty()) { mergeLayer.getChildren().clear(); mergeLabels.clear(); return; }
-        grid.applyCss(); grid.layout();
-        var flow = grid.lookup(".virtual-flow");
-        if (flow == null) return;
-        var viewport = mergeLayer.sceneToLocal(flow.localToScene(flow.getBoundsInLocal()));
-        double right = viewport.getMaxX(), bottom = viewport.getMaxY();
-        for (var node : grid.lookupAll(".scroll-bar")) if (node instanceof ScrollBar bar && bar.isVisible()) {
-            var bound = mergeLayer.sceneToLocal(bar.localToScene(bar.getBoundsInLocal()));
-            if (bar.getOrientation() == javafx.geometry.Orientation.VERTICAL) right = Math.min(right, bound.getMinX());
-            else bottom = Math.min(bottom, bound.getMinY());
-        }
-        var clip = mergeLayer.getClip() instanceof javafx.scene.shape.Rectangle rectangle ? rectangle : new javafx.scene.shape.Rectangle();
-        clip.setX(viewport.getMinX()); clip.setY(viewport.getMinY());
-        clip.setWidth(Math.max(0, right - viewport.getMinX())); clip.setHeight(Math.max(0, bottom - viewport.getMinY()));
-        if (mergeLayer.getClip() != clip) mergeLayer.setClip(clip);
-        var visible = grid.lookupAll(".table-cell").stream().filter(n -> n instanceof GridCell cell && !cell.isEmpty()
-                && cell.getTableRow() != null && cell.getTableRow().getItem() != null).map(n -> (GridCell)n).toList();
-        var active = selected();
-        var children = new ArrayList<javafx.scene.Node>(); var keys = new HashSet<String>();
-        for (var range : ranges) {
-            double x = Double.POSITIVE_INFINITY, y = Double.POSITIVE_INFINITY, x2 = Double.NEGATIVE_INFINITY, y2 = Double.NEGATIVE_INFINITY;
-            boolean editing = false;
-            for (var cell : visible) if (range.isInRange(cell.getTableRow().getItem(), cell.column)) {
-                editing |= cell.isEditing();
-                var b = mergeLayer.sceneToLocal(cell.localToScene(cell.getBoundsInLocal()));
-                x = Math.min(x, b.getMinX()); y = Math.min(y, b.getMinY()); x2 = Math.max(x2, b.getMaxX()); y2 = Math.max(y2, b.getMaxY());
-            }
-            if (editing || !Double.isFinite(x) || x2 <= viewport.getMinX() || y2 <= viewport.getMinY() || x >= right || y >= bottom) continue;
-            String key = range.formatAsString(); keys.add(key);
-            var label = mergeLabels.computeIfAbsent(key, _ -> {
-                var result = new Label(); result.setManaged(false); result.setPadding(new Insets(4));
-                result.setOnMousePressed(event -> {
-                    if (event.getButton() == MouseButton.PRIMARY) {
-                        focusMergeAnchor(new Position(range.getFirstRow(), range.getFirstColumn()), event.getClickCount() >= 2); event.consume();
-                    }
-                });
-                return result;
-            });
-            var cell = book.cell(sheetIndex, range.getFirstRow(), range.getFirstColumn(), false);
-            label.setText(book.display(sheetIndex, range.getFirstRow(), range.getFirstColumn()));
-            label.setWrapText(cell != null && cell.getCellStyle().getWrapText());
-            boolean selected = active != null && range.isInRange(active.row(), active.column());
-            label.setStyle("-fx-background-color:white;-fx-text-fill:#172033;-fx-alignment:CENTER-LEFT;" + cellCss(cell, selected)
-                    + (selected ? "-fx-background-color:#dbeafe;-fx-border-color:#2563eb;" : "-fx-border-color:#cbd5e1;") + "-fx-border-width:1;");
-            label.resizeRelocate(x, y, x2-x, y2-y); children.add(label);
-        }
-        mergeLabels.keySet().retainAll(keys);
-        if (!mergeLayer.getChildren().equals(children)) mergeLayer.getChildren().setAll(children);
-    }
+    private void requestMergePaint() { if (mergeOverlay != null) mergeOverlay.requestPaint(); }
+    private void paintMerges() { if (mergeOverlay != null) mergeOverlay.paint(); }
     private Position mergeAnchor(int row, int column) {
         var merge = MergeEdits.containing(book.workbook().getSheetAt(sheetIndex), row, column);
         return merge == null ? new Position(row, column) : new Position(merge.getFirstRow(), merge.getFirstColumn());
@@ -1095,5 +1035,5 @@ public final class SpreadsheetApp extends Application {
             return Math.min(409 * 96.0 / 72, super.computePrefHeight(isWrapText() ? Math.max(24, available) : width));
         }
     }
-    @Override public void stop() throws Exception { background.shutdownNow(); book.close(); }
+    @Override public void stop() throws Exception { if (mergeOverlay != null) mergeOverlay.close(); background.shutdownNow(); book.close(); }
 }
